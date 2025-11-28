@@ -30,7 +30,7 @@ flags.DEFINE_integer('online_steps', 1000000, 'Number of online steps.')
 flags.DEFINE_integer('buffer_size', 2000000, 'Replay buffer size.')
 flags.DEFINE_integer('log_interval', 5000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 100000, 'Evaluation interval.')
-flags.DEFINE_integer('save_interval', -1, 'Save interval.')
+flags.DEFINE_integer('save_interval', 100000, 'Save interval.')
 flags.DEFINE_integer('start_training', 5000, 'when does training start')
 
 flags.DEFINE_integer('utd_ratio', 1, "update to data ratio")
@@ -41,7 +41,7 @@ flags.DEFINE_integer('eval_episodes', 50, 'Number of evaluation episodes.')
 flags.DEFINE_integer('video_episodes', 0, 'Number of video episodes for each task.')
 flags.DEFINE_integer('video_frame_skip', 3, 'Frame skip for videos.')
 
-config_flags.DEFINE_config_file('agent', 'agents/acfql.py', lock_config=False)
+config_flags.DEFINE_config_file('agent', 'agents/debs.py', lock_config=False)
 
 flags.DEFINE_float('dataset_proportion', 1.0, "Proportion of the dataset to use")
 flags.DEFINE_integer('dataset_replace_interval', 1000, 'Dataset replace interval, used for large datasets because of memory constraints')
@@ -66,7 +66,7 @@ class LoggingHelper:
 
 def main(_):
     exp_name = get_exp_name(FLAGS.seed)
-    run = setup_wandb(project='qc', group=FLAGS.run_group, name=exp_name)
+    run = setup_wandb(project='debs', group=FLAGS.run_group, name=exp_name)
     
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
@@ -191,7 +191,7 @@ def main(_):
         if i == FLAGS.offline_steps - 1 or \
             (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
             # during eval, the action chunk is executed fully
-            eval_info, _, _ = evaluate(
+            eval_info, _, video = evaluate(
                 agent=agent,
                 env=eval_env,
                 action_dim=example_batch["actions"].shape[-1],
@@ -200,134 +200,137 @@ def main(_):
                 video_frame_skip=FLAGS.video_frame_skip,
             )
             logger.log(eval_info, "eval", step=log_step)
+            wandb.log({
+                f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
+            }, step=log_step)
 
-    # transition from offline to online
-    replay_buffer = ReplayBuffer.create_from_initial_dataset(
-        dict(train_dataset), size=max(FLAGS.buffer_size, train_dataset.size + 1)
-    )
+    # # transition from offline to online
+    # replay_buffer = ReplayBuffer.create_from_initial_dataset(
+    #     dict(train_dataset), size=max(FLAGS.buffer_size, train_dataset.size + 1)
+    # )
         
-    ob, _ = env.reset()
+    # ob, _ = env.reset()
     
-    action_queue = []
-    action_dim = example_batch["actions"].shape[-1]
+    # action_queue = []
+    # action_dim = example_batch["actions"].shape[-1]
 
-    # Online RL
-    update_info = {}
+    # # Online RL
+    # update_info = {}
 
-    from collections import defaultdict
-    data = defaultdict(list)
-    online_init_time = time.time()
-    for i in tqdm.tqdm(range(1, FLAGS.online_steps + 1)):
-        log_step += 1
-        online_rng, key = jax.random.split(online_rng)
+    # from collections import defaultdict
+    # data = defaultdict(list)
+    # online_init_time = time.time()
+    # for i in tqdm.tqdm(range(1, FLAGS.online_steps + 1)):
+    #     log_step += 1
+    #     online_rng, key = jax.random.split(online_rng)
         
-        # during online rl, the action chunk is executed fully
-        if len(action_queue) == 0:
-            action = agent.sample_actions(observations=ob, rng=key)
+    #     # during online rl, the action chunk is executed fully
+    #     if len(action_queue) == 0:
+    #         action = agent.sample_actions(observations=ob, rng=key)
 
-            action_chunk = np.array(action).reshape(-1, action_dim)
-            for action in action_chunk:
-                action_queue.append(action)
-        action = action_queue.pop(0)
+    #         action_chunk = np.array(action).reshape(-1, action_dim)
+    #         for action in action_chunk:
+    #             action_queue.append(action)
+    #     action = action_queue.pop(0)
         
-        next_ob, int_reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
+    #     next_ob, int_reward, terminated, truncated, info = env.step(action)
+    #     done = terminated or truncated
 
-        if FLAGS.save_all_online_states:
-            state = env.get_state()
-            data["steps"].append(i)
-            data["obs"].append(np.copy(next_ob))
-            data["qpos"].append(np.copy(state["qpos"]))
-            data["qvel"].append(np.copy(state["qvel"]))
-            if "button_states" in state:
-                data["button_states"].append(np.copy(state["button_states"]))
+    #     if FLAGS.save_all_online_states:
+    #         state = env.get_state()
+    #         data["steps"].append(i)
+    #         data["obs"].append(np.copy(next_ob))
+    #         data["qpos"].append(np.copy(state["qpos"]))
+    #         data["qvel"].append(np.copy(state["qvel"]))
+    #         if "button_states" in state:
+    #             data["button_states"].append(np.copy(state["button_states"]))
         
-        # logging useful metrics from info dict
-        env_info = {}
-        for key, value in info.items():
-            if key.startswith("distance"):
-                env_info[key] = value
-        # always log this at every step
-        logger.log(env_info, "env", step=log_step)
+    #     # logging useful metrics from info dict
+    #     env_info = {}
+    #     for key, value in info.items():
+    #         if key.startswith("distance"):
+    #             env_info[key] = value
+    #     # always log this at every step
+    #     logger.log(env_info, "env", step=log_step)
 
-        if 'antmaze' in FLAGS.env_name and (
-            'diverse' in FLAGS.env_name or 'play' in FLAGS.env_name or 'umaze' in FLAGS.env_name
-        ):
-            # Adjust reward for D4RL antmaze.
-            int_reward = int_reward - 1.0
-        elif is_robomimic_env(FLAGS.env_name):
-            # Adjust online (0, 1) reward for robomimic
-            int_reward = int_reward - 1.0
+    #     if 'antmaze' in FLAGS.env_name and (
+    #         'diverse' in FLAGS.env_name or 'play' in FLAGS.env_name or 'umaze' in FLAGS.env_name
+    #     ):
+    #         # Adjust reward for D4RL antmaze.
+    #         int_reward = int_reward - 1.0
+    #     elif is_robomimic_env(FLAGS.env_name):
+    #         # Adjust online (0, 1) reward for robomimic
+    #         int_reward = int_reward - 1.0
 
-        if FLAGS.sparse:
-            assert int_reward <= 0.0
-            int_reward = (int_reward != 0.0) * -1.0
+    #     if FLAGS.sparse:
+    #         assert int_reward <= 0.0
+    #         int_reward = (int_reward != 0.0) * -1.0
 
-        transition = dict(
-            observations=ob,
-            actions=action,
-            rewards=int_reward,
-            terminals=float(done),
-            masks=1.0 - terminated,
-            next_observations=next_ob,
-        )
-        replay_buffer.add_transition(transition)
+    #     transition = dict(
+    #         observations=ob,
+    #         actions=action,
+    #         rewards=int_reward,
+    #         terminals=float(done),
+    #         masks=1.0 - terminated,
+    #         next_observations=next_ob,
+    #     )
+    #     replay_buffer.add_transition(transition)
         
-        # done
-        if done:
-            ob, _ = env.reset()
-            action_queue = []  # reset the action queue
-        else:
-            ob = next_ob
+    #     # done
+    #     if done:
+    #         ob, _ = env.reset()
+    #         action_queue = []  # reset the action queue
+    #     else:
+    #         ob = next_ob
 
-        if i >= FLAGS.start_training:
-            batch = replay_buffer.sample_sequence(config['batch_size'] * FLAGS.utd_ratio, 
-                        sequence_length=FLAGS.horizon_length, discount=discount)
-            batch = jax.tree.map(lambda x: x.reshape((
-                FLAGS.utd_ratio, config["batch_size"]) + x.shape[1:]), batch)
+    #     if i >= FLAGS.start_training:
+    #         batch = replay_buffer.sample_sequence(config['batch_size'] * FLAGS.utd_ratio, 
+    #                     sequence_length=FLAGS.horizon_length, discount=discount)
+    #         batch = jax.tree.map(lambda x: x.reshape((
+    #             FLAGS.utd_ratio, config["batch_size"]) + x.shape[1:]), batch)
 
-            agent, update_info["online_agent"] = agent.batch_update(batch)
+    #         agent, update_info["online_agent"] = agent.batch_update(batch)
             
-        if i % FLAGS.log_interval == 0:
-            for key, info in update_info.items():
-                logger.log(info, key, step=log_step)
-            update_info = {}
+    #     if i % FLAGS.log_interval == 0:
+    #         for key, info in update_info.items():
+    #             logger.log(info, key, step=log_step)
+    #         update_info = {}
 
-        if i == FLAGS.online_steps - 1 or \
-            (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
-            eval_info, _, _ = evaluate(
-                agent=agent,
-                env=eval_env,
-                action_dim=action_dim,
-                num_eval_episodes=FLAGS.eval_episodes,
-                num_video_episodes=FLAGS.video_episodes,
-                video_frame_skip=FLAGS.video_frame_skip,
-            )
-            logger.log(eval_info, "eval", step=log_step)
+    #     if i == FLAGS.online_steps - 1 or \
+    #         (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
+    #         eval_info, _, _ = evaluate(
+    #             agent=agent,
+    #             env=eval_env,
+    #             action_dim=action_dim,
+    #             num_eval_episodes=FLAGS.eval_episodes,
+    #             num_video_episodes=FLAGS.video_episodes,
+    #             video_frame_skip=FLAGS.video_frame_skip,
+    #         )
+    #         logger.log(eval_info, "eval", step=log_step)
 
-        # saving
-        if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
-            save_agent(agent, FLAGS.save_dir, log_step)
+    #     # saving
+    #     if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
+    #         save_agent(agent, FLAGS.save_dir, log_step)
 
-    end_time = time.time()
+    # end_time = time.time()
 
-    for key, csv_logger in logger.csv_loggers.items():
-        csv_logger.close()
+    # for key, csv_logger in logger.csv_loggers.items():
+    #     csv_logger.close()
 
-    if FLAGS.save_all_online_states:
-        c_data = {"steps": np.array(data["steps"]),
-                 "qpos": np.stack(data["qpos"], axis=0), 
-                 "qvel": np.stack(data["qvel"], axis=0), 
-                 "obs": np.stack(data["obs"], axis=0), 
-                 "offline_time": online_init_time - offline_init_time,
-                 "online_time": end_time - online_init_time,
-        }
-        if len(data["button_states"]) != 0:
-            c_data["button_states"] = np.stack(data["button_states"], axis=0)
-        np.savez(os.path.join(FLAGS.save_dir, "data.npz"), **c_data)
+    # if FLAGS.save_all_online_states:
+    #     c_data = {"steps": np.array(data["steps"]),
+    #              "qpos": np.stack(data["qpos"], axis=0), 
+    #              "qvel": np.stack(data["qvel"], axis=0), 
+    #              "obs": np.stack(data["obs"], axis=0), 
+    #              "offline_time": online_init_time - offline_init_time,
+    #              "online_time": end_time - online_init_time,
+    #     }
+    #     if len(data["button_states"]) != 0:
+    #         c_data["button_states"] = np.stack(data["button_states"], axis=0)
+    #     np.savez(os.path.join(FLAGS.save_dir, "data.npz"), **c_data)
 
-    with open(os.path.join(FLAGS.save_dir, 'token.tk'), 'w') as f:
-        f.write(run.url)
+    # with open(os.path.join(FLAGS.save_dir, 'token.tk'), 'w') as f:
+    #     f.write(run.url)
 
 if __name__ == '__main__':
     app.run(main)
