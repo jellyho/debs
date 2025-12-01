@@ -95,8 +95,6 @@ class DEBSAgent(flax.struct.PyTreeNode):
         # Sum over targets (last dim), Mean over predictions (2nd to last)
         total_loss = element_wise_loss.sum(axis=-1).mean(axis=-1)
 
-        # print('ewl', total_loss.shape)
-
         # Vectorize over axis 0 (Ensemble Dimension) of current_zs
         # target_z is broadcasted to all ensembles (in_axes=None)
         # per_ensemble_losses = jax.vmap(single_ensemble_loss_fn, in_axes=(0, None))(current_zs, target_z)
@@ -149,7 +147,7 @@ class DEBSAgent(flax.struct.PyTreeNode):
                 ) * batch["valid"][..., None]
             )
 
-            bc_flow_loss = loss_cond + self.config['cfg_dropout'] * loss_uncond
+            bc_flow_loss = bc_flow_loss_cond + self.config['cfg_dropout'] * bc_flow_loss_uncond
         else:
             pred = self.network.select('actor_bc_flow')(batch['observations'], x_t, advantage=g, times=t, params=grad_params)
             # only bc on the valid chunk indices
@@ -162,6 +160,10 @@ class DEBSAgent(flax.struct.PyTreeNode):
 
         return bc_flow_loss, {
             'actor_loss': bc_flow_loss,
+            'g/mean': g.mean(),
+            'g/max': g.max(),
+            'g/min': g.min(),
+            'g/std': g.std(),
         }
 
     def _compute_normalized_advantage(self, batch, params):
@@ -227,7 +229,7 @@ class DEBSAgent(flax.struct.PyTreeNode):
         g = 2.0 * (T - v_min) / denom - 1
         
         # Clip g to [-1, 1]
-        g = jnp.clip(g, -1.0, 1.0)
+        # g = jnp.clip(g, -1.0, 1.0)
         
         # Ensure shape (Batch, 1)
         if g.ndim == 1:
@@ -235,6 +237,32 @@ class DEBSAgent(flax.struct.PyTreeNode):
             
         # IMPORTANT: Stop gradient so actor update doesn't affect critic
         return jax.lax.stop_gradient(g)
+
+    @jax.jit
+    def total_critic_loss(self, batch, grad_params, rng=None):
+        info = {}
+        rng = rng if rng is not None else self.rng
+
+        rng, critic_rng = jax.random.split(rng, 2)
+
+        critic_loss, critic_info = self.critic_loss(batch, grad_params, critic_rng)
+        for k, v in critic_info.items():
+            info[f'critic/{k}'] = v
+
+        return critic_loss, info
+
+    @jax.jit
+    def total_actor_loss(self, batch, grad_params, rng=None):
+        info = {}
+        rng = rng if rng is not None else self.rng
+
+        rng, actor_rng = jax.random.split(rng, 2)
+
+        actor_loss, actor_info = self.actor_loss(batch, grad_params, actor_rng)
+        for k, v in actor_info.items():
+            info[f'actor/{k}'] = v
+
+        return actor_loss, info
 
     @jax.jit
     def total_loss(self, batch, grad_params, rng=None):
@@ -275,6 +303,37 @@ class DEBSAgent(flax.struct.PyTreeNode):
         new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
         agent.target_update(new_network, 'critic')
         return agent.replace(network=new_network, rng=new_rng), info
+    
+    @staticmethod
+    def _critic_update(agent, batch):
+        """Update the agent and return a new agent with information dictionary."""
+        new_rng, rng = jax.random.split(agent.rng)
+
+        def loss_fn(grad_params):
+            return agent.total_critic_loss(batch, grad_params, rng=rng)
+
+        new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
+        agent.target_update(new_network, 'critic')
+        return agent.replace(network=new_network, rng=new_rng), info
+
+    @staticmethod
+    def _actor_update(agent, batch):
+        """Update the agent and return a new agent with information dictionary."""
+        new_rng, rng = jax.random.split(agent.rng)
+
+        def loss_fn(grad_params):
+            return agent.total_actor_loss(batch, grad_params, rng=rng)
+
+        new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
+        return agent.replace(network=new_network, rng=new_rng), info
+
+    @jax.jit
+    def critic_update(self, batch):
+        return self._critic_update(self, batch)
+    
+    @jax.jit
+    def actor_update(self, batch):
+        return self._actor_update(self, batch)
 
     @jax.jit
     def update(self, batch):
@@ -328,114 +387,35 @@ class DEBSAgent(flax.struct.PyTreeNode):
     @jax.jit
     def compute_flow_actions(
         self,
-        observations,
-        noises,
+        observation,
+        noise,
     ):
         """Compute actions from the BC flow model using the Euler method."""
         if self.config['encoder'] is not None:
-            observations = self.network.select('actor_bc_flow_encoder')(observations)
+            observation = self.network.select('actor_bc_flow_encoder')(observation)
         
-        actions = noises
-        # batch_size = actions.shape[0]
-        
+        action = noise        
         g_pos = jnp.ones((1), dtype=jnp.float32)
+        g_neg = -jnp.ones((1), dtype=jnp.float32)
 
         # Euler method.
         for i in range(self.config['flow_steps']):
-            t = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps'])
-            vels = self.network.select('actor_bc_flow')(observations, actions, g_pos, t, is_encoded=True)
-            actions = actions + vels / self.config['flow_steps']
-        actions = jnp.clip(actions, -1, 1)
-        return actions
+            observations = jnp.stack([observation, observation], axis=0)
+            actions = jnp.stack([action, action], axis=0)
+            gs = jnp.stack([g_pos, g_neg], axis=0)
 
-    # @jax.jit
-    # def compute_flow_actions(
-    #     self,
-    #     observations,
-    #     noises,
-    # ):
-    #     """
-    #     Compute actions from the BC flow model using Euler method with CFG support.
-        
-    #     Logic:
-    #     1. cfg == 1.0: Standard Conditional Generation (g=1).
-    #     2. use_bad_to_good_cfg: Extrapolate from Bad(g=-1) to Good(g=1).
-    #     3. use_cfg: Extrapolate from Uncond(g=None) to Cond(g=1).
-    #     """
-    #     # 1. Encode observations once (Efficiency)
-    #     if self.config['encoder'] is not None:
-    #         observations = self.network.select('actor_bc_flow_encoder')(observations)
+            ts = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps'])
+            # ts = jnp.stack([t, t], axis=0)
+            # print(observations.shape, actions.shape, gs.shape, ts.shape)
             
-    #     actions = noises
-    #     batch_size = actions.shape[0]
-    #     cfg_scale = self.config['cfg']
-        
-    #     # Prepare G conditions
-    #     # Positive Target: 1.0
-    #     g_pos = jnp.ones((batch_size, 1), dtype=jnp.float32)
-        
-    #     # Negative Target (only for bad_to_good)
-    #     # Negative: -1.0
-    #     g_neg_array = -1.0 * jnp.ones((batch_size, 1), dtype=jnp.float32)
-
-    #     # Euler loop
-    #     dt = 1.0 / self.config['flow_steps']
-        
-    #     def body_fn(i, x):
-    #         t_val = i * dt
-    #         t_batch = jnp.full((batch_size, 1), t_val)
-            
-    #         # --- Branching Logic for CFG ---
-            
-    #         # Case A: No Guidance (cfg=1.0)
-    #         if cfg_scale == 1.0:
-    #             vel = self.network.select('actor_bc_flow')(
-    #                 observations, x, advantage=g_pos, times=t_batch, is_encoded=True
-    #             )
-                
-    #         # Case B: Bad-to-Good Guidance (-1 to 1) -> Batch Doubling Optimization
-    #         elif self.config['use_bad_to_good_cfg']:
-    #             # Concatenate inputs to run in a single forward pass
-    #             obs_in = jnp.concatenate([observations, observations], axis=0)
-    #             x_in = jnp.concatenate([x, x], axis=0)
-    #             t_in = jnp.concatenate([t_batch, t_batch], axis=0)
-    #             # Cond: [Positive(1), Negative(-1)]
-    #             g_in = jnp.concatenate([g_pos, g_neg_array], axis=0)
-                
-    #             v_out = self.network.select('actor_bc_flow')(
-    #                 obs_in, x_in, advantage=g_in, times=t_in, is_encoded=True
-    #             )
-                
-    #             v_pos, v_neg = jnp.split(v_out, 2, axis=0)
-    #             vel = v_neg + cfg_scale * (v_pos - v_neg)
-
-    #         # Case C: Standard CFG (None to 1) -> Two-pass (since None cannot be batched with Array)
-    #         elif self.config['use_cfg']:
-    #             # 1. Conditional (g=1)
-    #             v_pos = self.network.select('actor_bc_flow')(
-    #                 observations, x, advantage=g_pos, times=t_batch, is_encoded=True
-    #             )
-    #             # 2. Unconditional (g=None -> Null Embedding)
-    #             v_uncond = self.network.select('actor_bc_flow')(
-    #                 observations, x, advantage=None, times=t_batch, is_encoded=True
-    #             )
-                
-    #             vel = v_uncond + cfg_scale * (v_pos - v_uncond)
-                
-    #         else:
-    #             # Fallback (Should not happen given configs, treat as Case A)
-    #             vel = self.network.select('actor_bc_flow')(
-    #                 observations, x, advantage=g_pos, times=t_batch, is_encoded=True
-    #             )
-
-    #         return x + vel * dt
-
-    #     # Run Loop
-    #     actions = jax.lax.fori_loop(0, self.config['flow_steps'], body_fn, actions)
-        
-    #     # Clip final actions
-    #     actions = jnp.clip(actions, -1.0, 1.0)
-    #     return actions
+            vels = self.network.select('actor_bc_flow')(observations, actions, gs, ts, is_encoded=True)
+            v_pos, v_neg = jnp.split(vels, 2, axis=0)
+            vel = v_neg + self.config['cfg'] * (v_pos - v_neg)
+            # print(v_neg.shape, v_pos.shape, vel.shape)
+            action = action + vel[0] / self.config['flow_steps']
+            # print(action.shape)
+        action = jnp.clip(action, -1, 1)
+        return action
 
     @classmethod
     def create(

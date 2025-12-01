@@ -1,5 +1,5 @@
 #!/bin/bash
-
+# CUDA_VISIBLE_DEVICES=6
 MUJOCO_GL=egl
 python main.py \
     --run_group=reproduce \
@@ -8,4 +8,7 @@ python main.py \
     --horizon_length=10 \
     --agent.lr 3e-4 \
     --eval_interval 100000 \
-    --video_episodes 10
+    --video_episodes 10 \
+    --offline_steps 1000000 \
+    --save_dir "exp/" \
+    --agent.cfg 3.0
