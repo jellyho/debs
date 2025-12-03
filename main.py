@@ -157,7 +157,7 @@ def main(_):
     )
 
 
-    # Offline RL - Value function traininig
+    # Offline RL
     for i in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):
         log_step += 1
 

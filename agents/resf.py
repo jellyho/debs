@@ -9,9 +9,9 @@ import optax
 
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
-from utils.networks import AdvantageConditionedActorVectorField, QuantileValue
+from utils.networks import ActorVectorField, QuantileValue
 
-class DEBSAgent(flax.struct.PyTreeNode):
+class RESFAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
     """
 
@@ -144,49 +144,41 @@ class DEBSAgent(flax.struct.PyTreeNode):
         vel = x_1 - x_0
 
         g = self._compute_normalized_advantage(batch, params=grad_params)
+        pred = self.network.select('actor_bc_flow')(batch['observations'], x_t, times=t, params=grad_params)
 
-        if self.config['use_cfg']:
-            pred_cond = self.network.select('actor_bc_flow')(
-            batch['observations'], x_t, advantage=g, times=t, params=grad_params
-            )
-            
-            # B. Unconditional Forward (Advantage = None)
-            pred_uncond = self.network.select('actor_bc_flow')(
-                batch['observations'], x_t, advantage=None, times=t, params=grad_params
-            )
+        # only bc on the valid chunk indices
+        bc_flow_loss = jnp.mean(
+            jnp.reshape(
+                (pred - vel) ** 2, 
+                (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
+            ) * batch["valid"][..., None]
+        )
 
-            bc_flow_loss_cond = jnp.mean(
-                jnp.reshape(
-                    (pred_cond - vel) ** 2, 
-                    (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
-                ) * batch["valid"][..., None]
-            )
+        pred_freezed = jax.lax.stop_gradient(pred)
+        res_vel = vel - pred_freezed
+        res_pred = self.network.select('actor_residual_flow')(
+            batch['observations'], 
+            jnp.concatenate([x_t, pred_freezed], axis=-1),
+            times=t, 
+            params=grad_params
+        )
 
-            bc_flow_loss_uncond = jnp.mean(
-                jnp.reshape(
-                    (pred_uncond - vel) ** 2, 
-                    (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
-                ) * batch["valid"][..., None]
-            )
+        adv_mask = (g > 0.0).astype(jnp.float32)
+        residual_weight = jnp.exp(3.0 * g) & adv_mask
 
-            bc_flow_loss = bc_flow_loss_cond + self.config['cfg_dropout'] * bc_flow_loss_uncond
-        else:
-            pred = self.network.select('actor_bc_flow')(batch['observations'], x_t, advantage=g, times=t, params=grad_params)
-            # only bc on the valid chunk indices
-            bc_flow_loss = jnp.mean(
-                jnp.reshape(
-                    (pred - vel) ** 2, 
-                    (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
-                ) * batch["valid"][..., None]
-            )
+        bc_residual_loss = jnp.mean(
+            jnp.reshape(
+                (res_pred - res_vel) ** 2, 
+                (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
+            ) * batch["valid"][..., None] * residual_weight
+        )
 
-            # res_vel = vel - pred
-            # res_pred = 
-
-            # bc_residual_loss = self.network.select('actor_bc_flow')(batch['observations'], x_t, advantage=g, times=t, params=grad_params)
-
+        actor_loss = bc_flow_loss + bc_residual_loss
+        
         return bc_flow_loss, {
             'actor_loss': bc_flow_loss,
+            'bc_loss': bc_flow_loss,
+            'residual_loss': bc_residual_loss,
             'g/mean': g.mean(),
             'g/max': g.max(),
             'g/min': g.min(),
@@ -252,7 +244,7 @@ class DEBSAgent(flax.struct.PyTreeNode):
         g = jnp.mean(is_greater, axis=-1)
         
         # 4. Scale to [-1, 1] (Optional, if you prefer centered range)
-        g = 2.0 * g - 1.0
+        g_centered = 2.0 * g - 1.0
         
         # Ensure shape (Batch, 1)
         if g.ndim == 1:
@@ -417,24 +409,22 @@ class DEBSAgent(flax.struct.PyTreeNode):
             observation = self.network.select('actor_bc_flow_encoder')(observation)
         
         action = noise        
-        g_pos = jnp.ones((1), dtype=jnp.float32)
-        g_neg = -jnp.ones((1), dtype=jnp.float32)
 
         # Euler method.
         for i in range(self.config['flow_steps']):
-            observations = jnp.stack([observation, observation], axis=0)
-            actions = jnp.stack([action, action], axis=0)
-            gs = jnp.stack([g_pos, g_neg], axis=0)
+            # observations = jnp.stack([observation, observation], axis=0)
+            # actions = jnp.stack([action, action], axis=0)
+            # gs = jnp.stack([g_pos, g_neg], axis=0)
 
-            ts = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps'])
-            # ts = jnp.stack([t, t], axis=0)
+            t = jnp.full((*observation.shape[:-1], 1), i / self.config['flow_steps'])
             # print(observations.shape, actions.shape, gs.shape, ts.shape)
             
-            vels = self.network.select('actor_bc_flow')(observations, actions, gs, ts, is_encoded=True)
-            v_pos, v_neg = jnp.split(vels, 2, axis=0)
-            vel = v_neg + self.config['cfg'] * (v_pos - v_neg)
+            vel = self.network.select('actor_bc_flow')(observation, action, t, is_encoded=True)
+            concatend = jnp.concatenate([action, vel], axis=-1)
+            resvel = self.network.select('actor_residual_flow')(observations, concatend, t, is_encoded=True)
+
             # print(v_neg.shape, v_pos.shape, vel.shape)
-            action = action + vel[0] / self.config['flow_steps']
+            action = action + (vel + resvel) / self.config['flow_steps']
             # print(action.shape)
         action = jnp.clip(action, -1, 1)
         return action
@@ -459,12 +449,12 @@ class DEBSAgent(flax.struct.PyTreeNode):
         rng, init_rng = jax.random.split(rng, 2)
 
         ex_times = ex_actions[..., :1]
-        ex_advantage = ex_actions[..., :1]
 
         ob_dims = ex_observations.shape
         action_dim = ex_actions.shape[-1]
         
         full_actions = jnp.concatenate([ex_actions] * config["horizon_length"], axis=-1)
+        residual_full_actions = jnp.concatenate([full_actions, full_actions], axis=-1)
         full_action_dim = full_actions.shape[-1]
 
         # Define encoders.
@@ -473,7 +463,7 @@ class DEBSAgent(flax.struct.PyTreeNode):
             encoder_module = encoder_modules[config['encoder']]
             encoders['critic'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()
-            encoders['actor_onestep_flow'] = encoder_module()
+            encoders['actor_residual_flow'] = encoder_module()
 
         # Define networks.
         critic_def = QuantileValue(
@@ -484,25 +474,37 @@ class DEBSAgent(flax.struct.PyTreeNode):
             num_quantiles=config['num_quantiles']
         )
 
-        actor_bc_flow_def = AdvantageConditionedActorVectorField(
+        actor_bc_flow_def = ActorVectorField(
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
             encoder=encoders.get('actor_bc_flow'),
             use_fourier_features=config["use_fourier_features"],
             fourier_feature_dim=config["fourier_feature_dim"],
-            advantage_fourier_feature_dim=config["advantage_fourier_feature_dim"],
-            use_cfg=config["use_cfg"]
+        )
+
+        actor_residual_flow_def = ActorVectorField(
+            hidden_dims=config['actor_hidden_dims'],
+            action_dim=full_action_dim,
+            layer_norm=config['actor_layer_norm'],
+            encoder=encoders.get('actor_bc_flow'),
+            use_fourier_features=config["use_fourier_features"],
+            fourier_feature_dim=config["fourier_feature_dim"],
         )
 
         network_info = dict(
-            actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_advantage, ex_times)),
+            actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
+            actor_residual_flow=(actor_residual_flow_def, (ex_observations, residual_full_actions, ex_times)),
             critic=(critic_def, (ex_observations)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations)),
         )
         if encoders.get('actor_bc_flow') is not None:
             # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
             network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
+
+        if encoders.get('actor_residual_flow') is not None:
+            # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
+            network_info['actor_residual_flow_encoder'] = (encoders.get('actor_residual_flow'), (ex_observations,))
 
         networks = {k: v[0] for k, v in network_info.items()}
         network_args = {k: v[1] for k, v in network_info.items()}
@@ -529,7 +531,7 @@ class DEBSAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='debs',  # Agent name.
+            agent_name='resf',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
