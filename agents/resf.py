@@ -417,7 +417,7 @@ class RESFAgent(flax.struct.PyTreeNode):
     def sample_actions(
         self,
         observations,
-        rng=None,
+        rng=None
     ):
         """
         Sample actions. 
@@ -446,7 +446,8 @@ class RESFAgent(flax.struct.PyTreeNode):
         # 4. Reshape if Chunking
         actions = jnp.reshape(
             actions, 
-            (self.config["horizon_length"], self.config["action_dim"])
+            (*observations.shape[: -len(self.config['ob_dims'])],
+                self.config["horizon_length"], self.config["action_dim"])
         )
             
         return actions
@@ -455,7 +456,7 @@ class RESFAgent(flax.struct.PyTreeNode):
     def compute_flow_actions(
         self,
         observation,
-        noise,
+        noise
     ):
         """Compute actions from the BC flow model using the Euler method."""
         if self.config['encoder'] is not None:
@@ -469,12 +470,6 @@ class RESFAgent(flax.struct.PyTreeNode):
             
             vel = self.network.select('actor_bc_flow')(observation, action, t, is_encoded=True)
             resvel = self.network.select('actor_residual_flow')(observation, action, vel, t, is_encoded=True)
-
-            # def get_cosine_sim(a, b):
-            #     return jnp.sum(a * b, axis=-1) / (jnp.linalg.norm(a, axis=-1) * jnp.linalg.norm(b, axis=-1) + 1e-8)
-            # c = get_cosine_sim(vel, resvel)
-            # jax.debug.print("{}", c)
-
             action = action + (vel + resvel) / self.config['flow_steps']
 
         action = jnp.clip(action, -1, 1)

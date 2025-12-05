@@ -139,8 +139,6 @@ def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
         from envs import bandit_utils
         env = bandit_utils.ToyBanditEnv(env_name, seed=0)
         eval_env = bandit_utils.ToyBanditEnv(env_name, seed=0)
-        env = EpisodeMonitor(env)
-        eval_env = EpisodeMonitor(eval_env)
         train_dataset = bandit_utils.make_bandit_datasets(env_name, dataset_size=1000, seed=0)
         val_dataset = None
     else:

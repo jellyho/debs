@@ -213,11 +213,12 @@ def main(_):
 
         if config['agent_name'] == 'debs':
             agent, offline_info = agent.actor_update(batch)
+            if i % FLAGS.log_interval == 0:
+                logger.log(offline_info, step=log_step)
         elif config['agent_name'] == 'resf':
             agent, offline_info = agent.residual_actor_update(batch)
-
-        if i % FLAGS.log_interval == 0:
-            logger.log(offline_info, step=log_step)
+            if i % FLAGS.log_interval == 0:
+                logger.log(offline_info, step=log_step)
         
         # saving
         if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:

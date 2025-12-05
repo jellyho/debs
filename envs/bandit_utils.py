@@ -4,31 +4,31 @@ import matplotlib.pyplot as plt
 from gymnasium import spaces
 import io
 from utils.datasets import Dataset
-
+import wandb
 # ==========================================
-# 1. Data Generators (Manifolds)
+# 1. Data Generators (Manifolds) - Deterministic Version
 # ==========================================
 
-def generate_bandit_1(n):
-    # Lv 1: 4-Gaussians (Easy)
+def generate_bandit_1(n, rng):
+    # Lv 1: 4-Gaussians
     centers = [(-0.7, -0.7), (-0.7, 0.7), (0.7, -0.7), (0.7, 0.7)]
     data = []
     for _ in range(n):
-        c = centers[np.random.randint(4)]
-        data.append(np.array(c) + 0.1 * np.random.randn(2))
+        c = centers[rng.randint(4)]
+        data.append(np.array(c) + 0.1 * rng.randn(2))
     return np.array(data).astype(np.float32)
 
-def generate_bandit_2(n):
-    # Lv 2: Checkerboard (Medium)
+def generate_bandit_2(n, rng):
+    # Lv 2: Checkerboard
     data = []
     while len(data) < n:
-        x, y = np.random.uniform(-1, 1, 2)
+        x, y = rng.uniform(-1, 1, 2)
         if (np.floor(x * 2) % 2 + np.floor(y * 2) % 2) % 2 == 0:
              data.append([x, y])
     return np.array(data[:n]).astype(np.float32)
 
-def generate_bandit_3(n):
-    # Lv 3: Two Moons (Hard)
+def generate_bandit_3(n, rng):
+    # Lv 3: Two Moons
     n_out = n // 2
     n_in = n - n_out
     outer_x = np.cos(np.linspace(0, np.pi, n_out))
@@ -37,25 +37,25 @@ def generate_bandit_3(n):
     inner_y = 1 - np.sin(np.linspace(0, np.pi, n_in)) - 0.5
     X = np.vstack([np.append(outer_x, inner_x), np.append(outer_y, inner_y)]).T
     X = X * 0.8 - 0.4
-    X += 0.05 * np.random.randn(*X.shape)
+    X += 0.05 * rng.randn(*X.shape)
     return np.clip(X, -1, 1).astype(np.float32)
 
-def generate_bandit_4(n):
-    # Lv 4: Rings (Very Hard - Topological hole)
+def generate_bandit_4(n, rng):
+    # Lv 4: Rings
     noisy_circles = []
     for _ in range(n):
-        radius = 0.8 if np.random.rand() > 0.5 else 0.3
-        angle = np.random.rand() * 2 * np.pi
-        noise = 0.05 * np.random.randn(2)
+        radius = 0.8 if rng.rand() > 0.5 else 0.3
+        angle = rng.rand() * 2 * np.pi
+        noise = 0.05 * rng.randn(2)
         point = np.array([np.cos(angle) * radius, np.sin(angle) * radius]) + noise
         noisy_circles.append(point)
     return np.array(noisy_circles).astype(np.float32)
 
-def generate_bandit_5(n):
-    # Lv 5: Spiral (Extreme)
-    t = np.sqrt(np.random.uniform(0, 1, n)) * 540 * (2 * np.pi) / 360
-    x = -np.cos(t) * t + np.random.rand(n) * 0.05
-    y = np.sin(t) * t + np.random.rand(n) * 0.05
+def generate_bandit_5(n, rng):
+    # Lv 5: Spiral
+    t = np.sqrt(rng.uniform(0, 1, n)) * 540 * (2 * np.pi) / 360
+    x = -np.cos(t) * t + rng.rand(n) * 0.05
+    y = np.sin(t) * t + rng.rand(n) * 0.05
     data = np.vstack([x, y]).T
     data = data / (np.max(np.abs(data)) + 1e-6)
     return data.astype(np.float32)
@@ -139,8 +139,8 @@ class ToyBanditEnv(gym.Env):
         self.last_actions = None
         self.last_rewards = None
         
-        # GT Data for visualization (배경용)
-        self.gt_data = GENERATORS[env_name](2000)
+        rng = np.random.RandomState(seed)
+        self.gt_data = GENERATORS[env_name](2000, rng)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -237,7 +237,11 @@ def make_bandit_datasets(env_name, dataset_size=100000, seed=0):
     
     # 1. Actions 생성 (Manifold Generator 사용)
     # Shape: (dataset_size, 2)
-    actions = GENERATORS[env_name](dataset_size)
+    # [수정] RandomState 객체 생성 (Local RNG)
+    rng = np.random.RandomState(seed)
+    
+    # 1. Actions 생성 (Manifold Generator 사용)
+    actions = GENERATORS[env_name](dataset_size, rng)
     
     # 2. Rewards 계산 (Vectorized)
     # [수정] 리스트 컴프리헨션 제거 -> 배치 함수 사용
@@ -316,8 +320,8 @@ def evaluate(
 
     observation, info = env.reset()
     observations = np.zeros((1000, 2), dtype=np.float32)
-    action = actor_fn(observations=observation)
-    action = np.array(action).reshape(1000, -1)
+    actions = actor_fn(observations=observations)
+    actions = np.array(actions).reshape(1000, -1)
     _, rewards, _, _, _ = env.step(actions)
 
     # 4. Calculate Metrics
