@@ -3,14 +3,14 @@
 
 MUJOCO_GL=egl
 python main.py \
-    --agent "agents/$3.py" \
-    --run_group=$3 \
-    --env_name=$1-play-singletask-task$2-v0 \
+    --agent "agents/$2.py" \
+    --run_group=$2 \
+    --env_name="bandit-$1" \
     --sparse=False \
     --horizon_length 1 \
     --agent.lr 3e-4 \
-    --eval_interval 100 \
+    --eval_interval 200 \
     --video_episodes 10 \
     --offline_steps 1000 \
     --save_dir "exp/" \
-    --agent.cfg 2.0
+    # --agent.cfg 2.0

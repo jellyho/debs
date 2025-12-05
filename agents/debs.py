@@ -427,8 +427,6 @@ class DEBSAgent(flax.struct.PyTreeNode):
             gs = jnp.stack([g_pos, g_neg], axis=0)
 
             ts = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps'])
-            # ts = jnp.stack([t, t], axis=0)
-            # print(observations.shape, actions.shape, gs.shape, ts.shape)
             
             vels = self.network.select('actor_bc_flow')(observations, actions, gs, ts, is_encoded=True)
             v_pos, v_neg = jnp.split(vels, 2, axis=0)
@@ -550,6 +548,8 @@ def get_config():
             fourier_feature_dim=64,
             advantage_fourier_feature_dim=64,
             weight_decay=0.,
+            target_mode='expectile',
+            expectile_tau=0.9,
             num_quantiles=51,
             quantile_bound=0.05,
             use_cfg=False,

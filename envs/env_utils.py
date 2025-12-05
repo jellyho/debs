@@ -87,7 +87,6 @@ class FrameStackWrapper(gymnasium.Wrapper):
         self.frames.append(ob)
         return self.get_observation(), reward, terminated, truncated, info
 
-
 def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
     """Make offline RL environment and datasets.
 
@@ -136,6 +135,14 @@ def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
         eval_env = EpisodeMonitor(eval_env)
         dataset = robomimic_utils.get_dataset(env, env_name)
         train_dataset, val_dataset = dataset, None
+    elif 'bandit' in env_name:
+        from envs import bandit_utils
+        env = bandit_utils.ToyBanditEnv(env_name, seed=0)
+        eval_env = bandit_utils.ToyBanditEnv(env_name, seed=0)
+        env = EpisodeMonitor(env)
+        eval_env = EpisodeMonitor(eval_env)
+        train_dataset = bandit_utils.make_bandit_datasets(env_name, dataset_size=1000, seed=0)
+        val_dataset = None
     else:
         raise ValueError(f'Unsupported environment: {env_name}')
 

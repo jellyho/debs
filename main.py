@@ -53,16 +53,16 @@ flags.DEFINE_bool('sparse', False, "make the task sparse reward")
 flags.DEFINE_bool('save_all_online_states', False, "save all trajectories to npy")
 
 class LoggingHelper:
-    def __init__(self, csv_loggers, wandb_logger):
-        self.csv_loggers = csv_loggers
+    def __init__(self, wandb_logger):
         self.wandb_logger = wandb_logger
         self.first_time = time.time()
         self.last_time = time.time()
 
-    def log(self, data, prefix, step):
-        assert prefix in self.csv_loggers, prefix
-        self.csv_loggers[prefix].log(data, step=step)
-        self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
+    def log(self, data, step, prefix=None,):
+        if prefix is None:
+            self.wandb_logger.log({f'{k}': v for k, v in data.items()}, step=step)
+        else:
+            self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
 
 def main(_):
     exp_name = get_exp_name(FLAGS.seed)
@@ -151,8 +151,6 @@ def main(_):
         prefixes.append("offline_agent")
 
     logger = LoggingHelper(
-        csv_loggers={prefix: CsvLogger(os.path.join(FLAGS.save_dir, f"{prefix}.csv")) 
-                    for prefix in prefixes},
         wandb_logger=wandb,
     )
 
@@ -175,10 +173,22 @@ def main(_):
 
         batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
 
-        agent, offline_info = agent.critic_update(batch)
+        if config['agent_name'] == 'debs':
+            agent, offline_info = agent.critic_update(batch)
+        elif config['agent_name'] == 'resf':
+            agent, critic_info = agent.critic_update(batch)
+            agent, actor_info = agent.actor_update(batch)
+        else:
+            agent, info = agent.update(batch)
 
         if i % FLAGS.log_interval == 0:
-            logger.log(offline_info, "offline_agent", step=log_step)
+            if config['agent_name'] == 'debs':
+                logger.log(offline_info, step=log_step)
+            elif config['agent_name'] == 'resf':
+                logger.log(critic_info, step=log_step)
+                logger.log(actor_info, step=log_step)
+            else:
+                logger.log(info, step=log_step)
         
         # saving
         if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
@@ -201,10 +211,13 @@ def main(_):
 
         batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
 
-        agent, offline_info = agent.actor_update(batch)
+        if config['agent_name'] == 'debs':
+            agent, offline_info = agent.actor_update(batch)
+        elif config['agent_name'] == 'resf':
+            agent, offline_info = agent.residual_actor_update(batch)
 
         if i % FLAGS.log_interval == 0:
-            logger.log(offline_info, "offline_agent", step=log_step)
+            logger.log(offline_info, step=log_step)
         
         # saving
         if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
@@ -214,18 +227,30 @@ def main(_):
         if i == FLAGS.offline_steps - 1 or \
             (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
             # during eval, the action chunk is executed fully
-            eval_info, _, video = evaluate(
-                agent=agent,
-                env=eval_env,
-                action_dim=example_batch["actions"].shape[-1],
-                num_eval_episodes=FLAGS.eval_episodes,
-                num_video_episodes=FLAGS.video_episodes,
-                video_frame_skip=FLAGS.video_frame_skip,
-            )
-            logger.log(eval_info, "eval", step=log_step)
-            wandb.log({
-                f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
-            }, step=log_step)
+            if "bandit" in FLAGS.env_name:
+                from envs.bandit_utils import evaluate
+                eval_info, _, _ = evaluate(
+                    agent=agent,
+                    env=eval_env,
+                    action_dim=example_batch["actions"].shape[-1],
+                    num_eval_episodes=FLAGS.eval_episodes,
+                    num_video_episodes=FLAGS.video_episodes,
+                    video_frame_skip=FLAGS.video_frame_skip,
+                )
+                logger.log(eval_info, log_step, "eval")
+            else:
+                eval_info, _, video = evaluate(
+                    agent=agent,
+                    env=eval_env,
+                    action_dim=example_batch["actions"].shape[-1],
+                    num_eval_episodes=FLAGS.eval_episodes,
+                    num_video_episodes=FLAGS.video_episodes,
+                    video_frame_skip=FLAGS.video_frame_skip,
+                )
+                logger.log(eval_info, log_step, "eval")
+                wandb.log({
+                    f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
+                }, step=log_step)
 
 if __name__ == '__main__':
     app.run(main)

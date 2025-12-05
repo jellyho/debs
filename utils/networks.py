@@ -293,7 +293,7 @@ class ActorVectorField(nn.Module):
             self.ff = FourierFeatures(self.fourier_feature_dim)
 
     @nn.compact
-    def __call__(self, observations, actions, times=None, v_base=None, is_encoded=False):
+    def __call__(self, observations, actions, v_base=None, times=None, is_encoded=False):
         """Return the vectors at the given states, actions, and times (optional).
 
         Args:
@@ -308,12 +308,12 @@ class ActorVectorField(nn.Module):
         inputs.append(observations)
 
         if times is None:
-            inputs = inputs.append(actions)
-            # inputs = jnp.concatenate([observations, actions], axis=-1)
+            inputs.append(actions)
         else:
+            inputs.append(actions)
             if self.use_fourier_features:
                 times = self.ff(times)
-            inputs = inputs.append(times)
+            inputs.append(times)
 
         if v_base is not None:
             inputs.append(v_base)
