@@ -7,10 +7,10 @@ python main.py \
     --run_group=$3 \
     --env_name=$1-play-singletask-task$2-v0 \
     --sparse=False \
-    --horizon_length 1 \
+    --horizon_length 5 \
     --agent.lr 3e-4 \
-    --eval_interval 100 \
+    --eval_interval 10000 \
     --video_episodes 10 \
-    --offline_steps 1000 \
+    --offline_steps 100000 \
     --save_dir "exp/" \
-    --agent.cfg 2.0
+    --agent.cfg 1.0

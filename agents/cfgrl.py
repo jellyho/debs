@@ -9,9 +9,9 @@ import optax
 
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
-from utils.networks import ActorVectorField, QuantileValue
+from utils.networks import AdvantageConditionedActorVectorField, QuantileValue
 
-class RESFAgent(flax.struct.PyTreeNode):
+class CFGRLAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
     """
 
@@ -19,7 +19,7 @@ class RESFAgent(flax.struct.PyTreeNode):
     network: Any
     config: Any = nonpytree_field()
 
-    def critic_loss(self, batch, grad_params, rng): #
+    def critic_loss(self, batch, grad_params, rng):
         """Compute the behavior policy evaluation loss"""
 
         target_z = self._compute_target_quantiles(batch) # B, Q
@@ -31,13 +31,13 @@ class RESFAgent(flax.struct.PyTreeNode):
         avg_z = current_zs.mean(axis=0)  # (Batch, Num_Quantiles)
 
         return critic_loss, {
-            'critic/critic_loss': critic_loss,
-            'critic/v_mean': avg_z.mean(),
-            'critic/v_max': avg_z[..., -1].mean(),
-            'critic/v_min': avg_z[..., 0].mean(),
+            'critic_loss': critic_loss,
+            'v_mean': avg_z.mean(),
+            'v_max': avg_z[..., -1].mean(),
+            'v_min': avg_z[..., 0].mean(),
         }
 
-    def _compute_target_quantiles(self, batch): #
+    def _compute_target_quantiles(self, batch):
         # 1. Get Next State Distribution
         next_zs = self.network.select(f'target_critic')(
             batch['next_observations'][..., -1, :]
@@ -84,7 +84,7 @@ class RESFAgent(flax.struct.PyTreeNode):
             
         return jax.lax.stop_gradient(T)
 
-    def _compute_quantile_loss(self, current_zs, target_z, valid_mask): #
+    def _compute_quantile_loss(self, current_zs, target_z, valid_mask):
         """
         current_zs: (Batch, Num_Quantiles)
         target_z: (Batch, Num_Quantiles)
@@ -143,78 +143,39 @@ class RESFAgent(flax.struct.PyTreeNode):
         x_t = (1 - t) * x_0 + t * x_1
         vel = x_1 - x_0
 
-        pred = self.network.select('actor_bc_flow')(
-            batch['observations'], 
-            x_t, 
-            times=t, 
-            params=grad_params
+        g = self._compute_normalized_advantage(batch, params=grad_params)
+
+        pred_cond = self.network.select('actor_bc_flow')(
+        batch['observations'], x_t, advantage=g, times=t, params=grad_params
+        )
+        
+        # B. Unconditional Forward (Advantage = None)
+        pred_uncond = self.network.select('actor_bc_flow')(
+            batch['observations'], x_t, advantage=None, times=t, params=grad_params
         )
 
-        # only bc on the valid chunk indices
-        bc_flow_loss = jnp.mean(
+        bc_flow_loss_cond = jnp.mean(
             jnp.reshape(
-                (pred - vel) ** 2, 
+                (pred_cond - vel) ** 2, 
                 (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
             ) * batch["valid"][..., None]
         )
-        
-        return bc_flow_loss, {
-            'actor/actor_loss': bc_flow_loss,
-        }
 
-    def residual_actor_loss(self, batch, grad_params, rng):
-        batch_actions = jnp.reshape(batch["actions"], (batch["actions"].shape[0], -1))  # fold in horizon_length together with action_dim
-        batch_size, action_dim = batch_actions.shape
-        rng, x_rng, t_rng = jax.random.split(rng, 3)
-
-        # BC flow loss.
-        x_0 = jax.random.normal(x_rng, (batch_size, action_dim))
-        x_1 = batch_actions
-        # t = jax.random.uniform(t_rng, (batch_size, 1))
-        t = jax.random.beta(t_rng, 1.0, 2.0, shape=(batch_size, 1))
-        x_t = (1 - t) * x_0 + t * x_1
-        vel = x_1 - x_0
-
-        pred = self.network.select('actor_bc_flow')(
-            batch['observations'], 
-            x_t, 
-            times=t, 
-            params=grad_params
-        )
-
-        g = self._compute_normalized_advantage(batch, params=grad_params)
-
-        pred_freezed = jax.lax.stop_gradient(pred)
-        
-        res_vel = vel - pred_freezed
-
-        res_pred = self.network.select('actor_residual_flow')(
-            batch['observations'], 
-            x_t, 
-            times=t, 
-            v_base=pred_freezed,
-            params=grad_params
-        )
-
-        adv_mask = (g > 0.0).astype(jnp.float32)
-        residual_weight = jnp.exp(g) * adv_mask
-
-        bc_residual_loss = jnp.mean(
+        bc_flow_loss_uncond = jnp.mean(
             jnp.reshape(
-                (res_pred - res_vel) ** 2, 
+                (pred_uncond - vel) ** 2, 
                 (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
-            ) * batch["valid"][..., None],
-            axis=(1, 2)
+            ) * batch["valid"][..., None]
         )
-        bc_residual_loss = jnp.mean(residual_weight * bc_residual_loss)
 
-        return bc_residual_loss, {
-            'actor/residual_actor_loss': bc_residual_loss,
+        bc_flow_loss = bc_flow_loss_cond + self.config['cfg_dropout'] * bc_flow_loss_uncond
+
+        return bc_flow_loss, {
+            'actor_loss': bc_flow_loss,
             'g/mean': g.mean(),
             'g/max': g.max(),
             'g/min': g.min(),
             'g/std': g.std(),
-            'actor/resvel': jnp.mean(jnp.linalg.norm(res_vel, axis=-1))
         }
 
     def _compute_normalized_advantage(self, batch, params):
@@ -270,13 +231,12 @@ class RESFAgent(flax.struct.PyTreeNode):
         # Hard Indicator is fine since we don't need gradients flowing back to T here
         
         # (B, 1) > (B, N) -> (B, N) boolean
-        is_greater = (T >= z_sorted)
-        
-        # Mean over quantiles -> Percentile [0, 1]
-        g = jnp.mean(is_greater, axis=-1)
-        
-        # 4. Scale to [-1, 1] (Optional, if you prefer centered range)
-        g = 2.0 * g - 1.0
+        advantage_raw = T - z_sorted.mean(axis=-1, keepdims=True)
+
+        # 4. Binarize Advantage (CFGRL Logic)
+        # Positive Advantage -> 1.0
+        # Negative/Zero Advantage -> -1.0
+        g = jnp.where(advantage_raw > 0, 1.0, -1.0)
         
         # Ensure shape (Batch, 1)
         if g.ndim == 1:
@@ -286,23 +246,29 @@ class RESFAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def total_critic_loss(self, batch, grad_params, rng=None):
+        info = {}
         rng = rng if rng is not None else self.rng
 
         rng, critic_rng = jax.random.split(rng, 2)
 
         critic_loss, critic_info = self.critic_loss(batch, grad_params, critic_rng)
+        for k, v in critic_info.items():
+            info[f'critic/{k}'] = v
 
-        return critic_loss, critic_info
+        return critic_loss, info
 
     @jax.jit
     def total_actor_loss(self, batch, grad_params, rng=None):
+        info = {}
         rng = rng if rng is not None else self.rng
 
         rng, actor_rng = jax.random.split(rng, 2)
 
         actor_loss, actor_info = self.actor_loss(batch, grad_params, actor_rng)
+        for k, v in actor_info.items():
+            info[f'actor/{k}'] = v
 
-        return actor_loss, actor_info
+        return actor_loss, info
 
     @jax.jit
     def total_loss(self, batch, grad_params, rng=None):
@@ -313,27 +279,15 @@ class RESFAgent(flax.struct.PyTreeNode):
         rng, actor_rng, critic_rng = jax.random.split(rng, 3)
 
         critic_loss, critic_info = self.critic_loss(batch, grad_params, critic_rng)
-        actor_loss, actor_info = self.actor_loss(batch, grad_params, actor_rng)
-
         for k, v in critic_info.items():
-            info[k] = v
+            info[f'critic/{k}'] = v
 
+        actor_loss, actor_info = self.actor_loss(batch, grad_params, actor_rng)
         for k, v in actor_info.items():
-            info[k] = v
+            info[f'actor/{k}'] = v
 
         loss = critic_loss + actor_loss
         return loss, info
-
-    @jax.jit
-    def total_residual_loss(self, batch, grad_params, rng=None):
-        """Compute the total loss."""
-        info = {}
-        rng = rng if rng is not None else self.rng
-        rng, residual_actor_rng = jax.random.split(rng, 2)
-
-        residual_actor_loss, residual_actor_info = self.residual_actor_loss(batch, grad_params, actor_rng)
-
-        return residual_actor_loss, residual_actor_info
 
     def target_update(self, network, module_name):
         """Update the target network."""
@@ -379,17 +333,6 @@ class RESFAgent(flax.struct.PyTreeNode):
         new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
         return agent.replace(network=new_network, rng=new_rng), info
 
-    @staticmethod
-    def _residual_actor_update(agent, batch):
-        """Update the agent and return a new agent with information dictionary."""
-        new_rng, rng = jax.random.split(agent.rng)
-
-        def loss_fn(grad_params):
-            return agent.residual_actor_loss(batch, grad_params, rng=rng)
-
-        new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
-        return agent.replace(network=new_network, rng=new_rng), info  
-
     @jax.jit
     def critic_update(self, batch):
         return self._critic_update(self, batch)
@@ -397,10 +340,6 @@ class RESFAgent(flax.struct.PyTreeNode):
     @jax.jit
     def actor_update(self, batch):
         return self._actor_update(self, batch)
-
-    @jax.jit
-    def residual_actor_update(self, batch):
-        return self._residual_actor_update(self, batch)
 
     @jax.jit
     def update(self, batch):
@@ -417,7 +356,7 @@ class RESFAgent(flax.struct.PyTreeNode):
     def sample_actions(
         self,
         observations,
-        rng=None
+        rng=None,
     ):
         """
         Sample actions. 
@@ -446,8 +385,8 @@ class RESFAgent(flax.struct.PyTreeNode):
         # 4. Reshape if Chunking
         actions = jnp.reshape(
             actions, 
-            (*observations.shape[: -len(self.config['ob_dims'])],
-                self.config["horizon_length"], self.config["action_dim"])
+            (*observations.shape[: -len(self.config['ob_dims'])],  # batch_size
+            self.config["horizon_length"], self.config["action_dim"])
         )
             
         return actions
@@ -456,22 +395,22 @@ class RESFAgent(flax.struct.PyTreeNode):
     def compute_flow_actions(
         self,
         observation,
-        noise
+        noise,
     ):
         """Compute actions from the BC flow model using the Euler method."""
         if self.config['encoder'] is not None:
             observation = self.network.select('actor_bc_flow_encoder')(observation)
         
         action = noise        
+        g_pos = jnp.ones((*observation.shape[:-1], 1), dtype=jnp.float32)
 
         # Euler method.
         for i in range(self.config['flow_steps']):
             t = jnp.full((*observation.shape[:-1], 1), i / self.config['flow_steps'])
-            
-            vel = self.network.select('actor_bc_flow')(observation, action, t, is_encoded=True)
-            resvel = self.network.select('actor_residual_flow')(observation, action, t, vel, is_encoded=True)
-            action = action + (vel + resvel) / self.config['flow_steps']
-
+            vel = self.network.select('actor_bc_flow')(observation, action, g_pos, t, is_encoded=True)
+            uncond_vel = self.network.select('actor_bc_flow')(observation, action, None, t, is_encoded=True)
+            vel = uncond_vel + self.config['cfg'] * (vel - uncond_vel)
+            action = action + vel / self.config['flow_steps']
         action = jnp.clip(action, -1, 1)
         return action
 
@@ -495,6 +434,7 @@ class RESFAgent(flax.struct.PyTreeNode):
         rng, init_rng = jax.random.split(rng, 2)
 
         ex_times = ex_actions[..., :1]
+        ex_advantage = ex_actions[..., :1]
 
         ob_dims = ex_observations.shape
         action_dim = ex_actions.shape[-1]
@@ -508,7 +448,7 @@ class RESFAgent(flax.struct.PyTreeNode):
             encoder_module = encoder_modules[config['encoder']]
             encoders['critic'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()
-            encoders['actor_residual_flow'] = encoder_module()
+            encoders['actor_onestep_flow'] = encoder_module()
 
         # Define networks.
         critic_def = QuantileValue(
@@ -519,37 +459,25 @@ class RESFAgent(flax.struct.PyTreeNode):
             num_quantiles=config['num_quantiles']
         )
 
-        actor_bc_flow_def = ActorVectorField(
+        actor_bc_flow_def = AdvantageConditionedActorVectorField(
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
             encoder=encoders.get('actor_bc_flow'),
             use_fourier_features=config["use_fourier_features"],
             fourier_feature_dim=config["fourier_feature_dim"],
-        )
-
-        actor_residual_flow_def = ActorVectorField(
-            hidden_dims=config['actor_hidden_dims'],
-            action_dim=full_action_dim,
-            layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_bc_flow'),
-            use_fourier_features=config["use_fourier_features"],
-            fourier_feature_dim=config["fourier_feature_dim"],
+            advantage_fourier_feature_dim=config["advantage_fourier_feature_dim"],
+            use_cfg=True
         )
 
         network_info = dict(
-            actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
-            actor_residual_flow=(actor_residual_flow_def, (ex_observations, full_actions, ex_times, full_actions)),
+            actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_advantage, ex_times)),
             critic=(critic_def, (ex_observations)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations)),
         )
         if encoders.get('actor_bc_flow') is not None:
             # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
             network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
-
-        if encoders.get('actor_residual_flow') is not None:
-            # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
-            network_info['actor_residual_flow_encoder'] = (encoders.get('actor_residual_flow'), (ex_observations,))
 
         networks = {k: v[0] for k, v in network_info.items()}
         network_args = {k: v[1] for k, v in network_info.items()}
@@ -576,7 +504,7 @@ class RESFAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='resf',  # Agent name.
+            agent_name='cfgrl',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
@@ -595,16 +523,16 @@ def get_config():
             action_chunking=True,  # False means n-step return
             use_fourier_features=False,
             fourier_feature_dim=64,
+            advantage_fourier_feature_dim=64,
             weight_decay=0.,
             target_mode='expectile',
             expectile_tau=0.9,
             num_quantiles=51,
             quantile_bound=0.05,
-            use_cfg=False,
+            use_cfg=True,
             use_bad_to_good_cfg=False,
             cfg=1.0,
-            cfg_dropout=0.1,
-            alpha=1.0
+            cfg_dropout=0.1
         )
     )
     return config

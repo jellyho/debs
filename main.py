@@ -10,7 +10,7 @@ from envs.robomimic_utils import is_robomimic_env
 from utils.flax_utils import save_agent
 from utils.datasets import Dataset, ReplayBuffer
 
-from evaluation import evaluate
+
 from agents import agents
 import numpy as np
 
@@ -58,11 +58,17 @@ class LoggingHelper:
         self.first_time = time.time()
         self.last_time = time.time()
 
+    def iterate(self, key, value):
+        if 'hist' in key:
+            return wandb.Histogram(value)
+        else:
+            return value
+
     def log(self, data, step, prefix=None,):
         if prefix is None:
-            self.wandb_logger.log({f'{k}': v for k, v in data.items()}, step=step)
+            self.wandb_logger.log({f'{k}': self.iterate(k, v) for k, v in data.items()}, step=step)
         else:
-            self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
+            self.wandb_logger.log({f'{prefix}/{k}': self.iterate(k, v) for k, v in data.items()}, step=step)
 
 def main(_):
     exp_name = get_exp_name(FLAGS.seed)
@@ -173,20 +179,14 @@ def main(_):
 
         batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
 
-        if config['agent_name'] == 'debs':
+        if config['agent_name'] in ['debs', 'cfgrl']:
             agent, offline_info = agent.critic_update(batch)
-        elif config['agent_name'] == 'resf':
-            agent, critic_info = agent.critic_update(batch)
-            agent, actor_info = agent.actor_update(batch)
         else:
             agent, info = agent.update(batch)
 
         if i % FLAGS.log_interval == 0:
-            if config['agent_name'] == 'debs':
+            if config['agent_name'] in ['debs', 'cfgrl']:
                 logger.log(offline_info, step=log_step)
-            elif config['agent_name'] == 'resf':
-                logger.log(critic_info, step=log_step)
-                logger.log(actor_info, step=log_step)
             else:
                 logger.log(info, step=log_step)
         
@@ -211,11 +211,11 @@ def main(_):
 
         batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
 
-        if config['agent_name'] == 'debs':
+        if config['agent_name'] in ['debs', 'cfgrl']:
             agent, offline_info = agent.actor_update(batch)
             if i % FLAGS.log_interval == 0:
                 logger.log(offline_info, step=log_step)
-        elif config['agent_name'] == 'resf':
+        elif config['agent_name'] in ['resf', 'addf']:
             agent, offline_info = agent.residual_actor_update(batch)
             if i % FLAGS.log_interval == 0:
                 logger.log(offline_info, step=log_step)
@@ -240,6 +240,7 @@ def main(_):
                 )
                 logger.log(eval_info, log_step, "eval")
             else:
+                from evaluation import evaluate
                 eval_info, _, video = evaluate(
                     agent=agent,
                     env=eval_env,

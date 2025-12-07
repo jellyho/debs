@@ -9,8 +9,9 @@ python main.py \
     --sparse=False \
     --horizon_length 1 \
     --agent.lr 3e-4 \
-    --eval_interval 2000 \
+    --eval_interval 10000 \
     --video_episodes 10 \
-    --offline_steps 10000 \
+    --offline_steps 100000 \
     --save_dir "exp/" \
-    # --agent.cfg 2.0
+    --agent.alpha 0.05 \
+    --agent.cfg 1.0

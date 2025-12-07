@@ -99,7 +99,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             q_loss = jnp.zeros(())
 
         # Total loss.
-        actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss + q_loss
+        actor_loss = bc_flow_loss + distill_loss + q_loss * self.config['alpha']
 
         return actor_loss, {
             'actor_loss': actor_loss,
@@ -328,7 +328,7 @@ def get_config():
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
             q_agg='mean',  # Aggregation method for target Q values.
-            alpha=100.0,  # BC coefficient (need to be tuned for each environment).
+            alpha=1.0,  # BC coefficient (need to be tuned for each environment).
             num_qs=2, # critic ensemble size
             flow_steps=10,  # Number of flow steps.
             normalize_q_loss=False,  # Whether to normalize the Q loss.

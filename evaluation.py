@@ -4,7 +4,7 @@ import jax
 import numpy as np
 from tqdm import trange
 from functools import partial
-
+import cv2
 
 def supply_rng(f, rng=jax.random.PRNGKey(0)):
     """Helper function to split the random number generator key before each call to the function."""
@@ -60,7 +60,9 @@ def evaluate(
     Returns:
         A tuple containing the statistics, trajectories, and rendered videos.
     """
-    actor_fn = supply_rng(agent.sample_actions, rng=jax.random.PRNGKey(np.random.randint(0, 2**32)))
+    rng = jax.random.PRNGKey(np.random.randint(0, 2**32))
+    actor_fn = supply_rng(agent.sample_actions, rng=rng)
+    critic_fn = supply_rng(agent.sample_values, rng=rng)
     trajs = []
     stats = defaultdict(list)
 
@@ -84,9 +86,11 @@ def evaluate(
         gripper_contact_lengths = []
         gripper_contact_length = 0
         while not done:
-            
             action = actor_fn(observations=observation)
-
+            if i < num_eval_episodes:
+                pass
+            else:
+                value = critic_fn(observation)
             if len(action_queue) == 0:
                 have_new_action = True
                 action = np.array(action).reshape(-1, action_dim)
@@ -106,6 +110,8 @@ def evaluate(
 
             if should_render and (step % video_frame_skip == 0 or done):
                 frame = env.render().copy()
+                mean_value = np.array(value.mean())
+                cv2.putText(frame, f"Value : {mean_value}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
                 render.append(frame)
 
             transition = dict(
@@ -152,7 +158,8 @@ def evaluate(
             add_to(stats, flatten(info))
             trajs.append(traj)
         else:
-            renders.append(np.array(render))
+            img = np.array(render)
+            renders.append(img)
 
     for k, v in stats.items():
         stats[k] = np.mean(v)

@@ -11,7 +11,7 @@ from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, QuantileValue
 
-class RESFAgent(flax.struct.PyTreeNode):
+class ADDFAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
     """
 
@@ -170,8 +170,8 @@ class RESFAgent(flax.struct.PyTreeNode):
         # BC flow loss.
         x_0 = jax.random.normal(x_rng, (batch_size, action_dim))
         x_1 = batch_actions
-        # t = jax.random.uniform(t_rng, (batch_size, 1))
-        t = jax.random.beta(t_rng, 1.0, 2.0, shape=(batch_size, 1))
+        t = jax.random.uniform(t_rng, (batch_size, 1))
+        # t = jax.random.beta(t_rng, 1.0, 2.0, shape=(batch_size, 1))
         x_t = (1 - t) * x_0 + t * x_1
         vel = x_1 - x_0
 
@@ -185,28 +185,25 @@ class RESFAgent(flax.struct.PyTreeNode):
         g = self._compute_normalized_advantage(batch, params=grad_params)
 
         pred_freezed = jax.lax.stop_gradient(pred)
-        
-        res_vel = vel - pred_freezed
 
         res_pred = self.network.select('actor_residual_flow')(
             batch['observations'], 
             x_t, 
-            times=t, 
-            v_base=pred_freezed,
+            advantage=g,
+            times=t,
             params=grad_params
         )
 
-        adv_mask = (g > 0.0).astype(jnp.float32)
-        residual_weight = jnp.exp(g) * adv_mask
+        vel_pred = (pred_freezed + res_pred) / 2.0
 
         bc_residual_loss = jnp.mean(
             jnp.reshape(
-                (res_pred - res_vel) ** 2, 
+                (vel - vel_pred) ** 2, 
                 (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
             ) * batch["valid"][..., None],
             axis=(1, 2)
         )
-        bc_residual_loss = jnp.mean(residual_weight * bc_residual_loss)
+        bc_residual_loss = jnp.mean(bc_residual_loss)
 
         return bc_residual_loss, {
             'actor/residual_actor_loss': bc_residual_loss,
@@ -462,15 +459,16 @@ class RESFAgent(flax.struct.PyTreeNode):
         if self.config['encoder'] is not None:
             observation = self.network.select('actor_bc_flow_encoder')(observation)
         
-        action = noise        
+        action = noise
+        g_pos = jnp.ones((*observation.shape[:-1], 1), dtype=jnp.float32)
 
         # Euler method.
         for i in range(self.config['flow_steps']):
             t = jnp.full((*observation.shape[:-1], 1), i / self.config['flow_steps'])
             
             vel = self.network.select('actor_bc_flow')(observation, action, t, is_encoded=True)
-            resvel = self.network.select('actor_residual_flow')(observation, action, t, vel, is_encoded=True)
-            action = action + (vel + resvel) / self.config['flow_steps']
+            resvel = self.network.select('actor_residual_flow')(observation, action, g_pos, t, is_encoded=True)
+            action = action + (vel + resvel) / (self.config['flow_steps'] * 2.0)
 
         action = jnp.clip(action, -1, 1)
         return action
@@ -495,6 +493,7 @@ class RESFAgent(flax.struct.PyTreeNode):
         rng, init_rng = jax.random.split(rng, 2)
 
         ex_times = ex_actions[..., :1]
+        ex_advantage = ex_actions[..., :1]
 
         ob_dims = ex_observations.shape
         action_dim = ex_actions.shape[-1]
@@ -528,18 +527,20 @@ class RESFAgent(flax.struct.PyTreeNode):
             fourier_feature_dim=config["fourier_feature_dim"],
         )
 
-        actor_residual_flow_def = ActorVectorField(
+        actor_residual_flow_def = AdvantageConditionedActorVectorField(
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
             encoder=encoders.get('actor_bc_flow'),
             use_fourier_features=config["use_fourier_features"],
             fourier_feature_dim=config["fourier_feature_dim"],
+            advantage_fourier_feature_dim=config["advantage_fourier_feature_dim"],
+            use_cfg=True
         )
 
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
-            actor_residual_flow=(actor_residual_flow_def, (ex_observations, full_actions, ex_times, full_actions)),
+            actor_residual_flow=(actor_residual_flow_def, (ex_observations, full_actions, ex_advantage, ex_times)),
             critic=(critic_def, (ex_observations)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations)),
         )

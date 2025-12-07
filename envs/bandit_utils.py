@@ -5,9 +5,35 @@ from gymnasium import spaces
 import io
 from utils.datasets import Dataset
 import wandb
+from sklearn.decomposition import PCA  # [New] PCA for visualization
 # ==========================================
 # 1. Data Generators (Manifolds) - Deterministic Version
 # ==========================================
+
+import gymnasium as gym
+import numpy as np
+import matplotlib.pyplot as plt
+from gymnasium import spaces
+import io
+from utils.datasets import Dataset
+import wandb
+from sklearn.decomposition import PCA  # [New] PCA for visualization
+# ==========================================
+# 1. Data Generators (Manifolds) - Deterministic Version
+# ==========================================
+
+def _get_bandit6_centers(rng=None):
+    """
+    50차원 공간에 9개의 클러스터 중심을 고정적으로 생성합니다.
+    첫 번째 중심(Index 0)을 Optimal Target으로 설정합니다.
+    """
+    # 시드가 달라도 항상 같은 위치에 중심을 만들기 위해 고정된 시드 사용
+    local_rng = np.random.RandomState(42) 
+    
+    # 50차원, 9개 클러스터
+    # [-0.8, 0.8] 범위 내에 랜덤하게 배치
+    centers = local_rng.uniform(-0.8, 0.8, size=(9, 50))
+    return centers
 
 def generate_bandit_1(n, rng):
     # Lv 1: 4-Gaussians
@@ -28,17 +54,37 @@ def generate_bandit_2(n, rng):
     return np.array(data[:n]).astype(np.float32)
 
 def generate_bandit_3(n, rng):
-    # Lv 3: Two Moons
-    n_out = n // 2
-    n_in = n - n_out
-    outer_x = np.cos(np.linspace(0, np.pi, n_out))
-    outer_y = np.sin(np.linspace(0, np.pi, n_out))
-    inner_x = 1 - np.cos(np.linspace(0, np.pi, n_in))
-    inner_y = 1 - np.sin(np.linspace(0, np.pi, n_in)) - 0.5
-    X = np.vstack([np.append(outer_x, inner_x), np.append(outer_y, inner_y)]).T
-    X = X * 0.8 - 0.4
-    X += 0.05 * rng.randn(*X.shape)
-    return np.clip(X, -1, 1).astype(np.float32)
+    # Lv 3: Two Moons (Hard) - Corrected
+    # 정확한 Interleaving Moons 구현
+    n_upper = n // 2
+    n_lower = n - n_upper
+    
+    # 1. Upper Moon (t: 0 ~ pi) -> 중심 (0, 0)
+    t_upper = np.linspace(0, np.pi, n_upper)
+    x_upper = np.cos(t_upper)
+    y_upper = np.sin(t_upper)
+    upper_moon = np.stack([x_upper, y_upper], axis=1)
+    
+    # 2. Lower Moon (t: 0 ~ pi) -> 중심 (1, -0.5)
+    t_lower = np.linspace(0, np.pi, n_lower)
+    x_lower = 1 - np.cos(t_lower)
+    y_lower = 1 - np.sin(t_lower) - 0.5
+    lower_moon = np.stack([x_lower, y_lower], axis=1)
+    
+    # 3. Combine
+    data = np.vstack([upper_moon, lower_moon])
+    
+    # 4. Normalize to [-1, 1]
+    # 원래 범위: x[-1, 2], y[-0.5, 1] -> 중심 (0.5, 0.25)
+    # 중심을 0으로 이동하고 스케일링
+    data[:, 0] -= 0.5
+    data[:, 1] -= 0.25
+    data *= 0.6 # [-1, 1] 안쪽으로 안전하게 들어오도록 축소
+    
+    # 5. Add Noise
+    data += 0.05 * rng.randn(*data.shape)
+    
+    return np.clip(data, -1.0, 1.0).astype(np.float32)
 
 def generate_bandit_4(n, rng):
     # Lv 4: Rings
@@ -60,6 +106,30 @@ def generate_bandit_5(n, rng):
     data = data / (np.max(np.abs(data)) + 1e-6)
     return data.astype(np.float32)
 
+def generate_bandit_6(n, rng):
+    """
+    Lv 6: High-Dim Clusters (Action Chunking Sim)
+    - Dim: 50
+    - Clusters: 9 (Mixture of Gaussians)
+    - Reward: Center 0 근처만 1.0, 나머지는 0.0
+    """
+    centers = _get_bandit6_centers()
+    n_clusters = len(centers)
+    
+    data = []
+    for _ in range(n):
+        # 9개 클러스터 중 하나 선택 (Uniform)
+        # 즉, 데이터셋에는 정답(1/9)과 오답(8/9)이 섞여 있음
+        c_idx = rng.randint(n_clusters)
+        center = centers[c_idx]
+        
+        # Noise (Cluster Spread)
+        # 50차원이므로 노이즈가 너무 크면 겹칠 수 있음. 작게 설정.
+        noise = 0.05 * rng.randn(50)
+        data.append(center + noise)
+        
+    return np.array(data).astype(np.float32)
+
 # 이름 매핑
 GENERATORS = {
     'bandit-1': generate_bandit_1,
@@ -67,6 +137,7 @@ GENERATORS = {
     'bandit-3': generate_bandit_3,
     'bandit-4': generate_bandit_4,
     'bandit-5': generate_bandit_5,
+    'bandit-6': generate_bandit_6,
 }
 
 # ==========================================
@@ -82,41 +153,133 @@ import io
 # 보상 함수 (벡터화 지원)
 def get_reward_batch(env_name, actions):
     """
-    actions: (N, 2) or (2,)
-    returns: (N,) or scalar
+    Multi-modal Reward with Hard Peaks.
+    Ensures Optimal Regions get exactly 1.0 reward.
     """
     actions = np.atleast_2d(actions)
+    rewards = np.zeros(len(actions), dtype=np.float32)
+    
     x = actions[:, 0]
     y = actions[:, 1]
-    rewards = np.zeros(len(actions), dtype=np.float32)
 
-    if env_name == 'bandit-1': # 4-Gaussians (Top-Right)
-        # Dist to (0.7, 0.7) < 0.2
-        dists = np.linalg.norm(actions - np.array([[0.7, 0.7]]), axis=1)
-        rewards = (dists < 0.2).astype(np.float32)
-
-    elif env_name == 'bandit-2': # Checkerboard (Center-Right-Top)
-        # 0.5 < x < 1.0 AND 0.5 < y < 1.0
-        mask = (x > 0.5) & (x < 1.0) & (y > 0.5) & (y < 1.0)
-        rewards = mask.astype(np.float32)
-
-    elif env_name == 'bandit-3': # Two Moons (Upper Moon Right tip)
-        # x > 0.5 AND y > 0.0 (Simplified region for moon tip)
-        mask = (x > 0.5) & (y > 0.0)
-        rewards = mask.astype(np.float32)
-
-    elif env_name == 'bandit-4': # Rings (Outer Ring 1 o'clock)
-        r = np.linalg.norm(actions, axis=1)
-        # 0.7 < r < 0.9 AND x > 0 AND y > 0
-        mask = (r > 0.7) & (r < 0.9) & (x > 0) & (y > 0)
-        rewards = mask.astype(np.float32)
-
-    elif env_name == 'bandit-5': # Spiral (Tail)
-        r = np.linalg.norm(actions, axis=1)
-        # r > 0.8 AND x > 0
-        mask = (r > 0.8) & (x > 0)
-        rewards = mask.astype(np.float32)
+    if env_name == 'bandit-1': # 4-Gaussians
+        # Centers
+        c1 = np.array([0.7, 0.7])   # Optimal
+        c2 = np.array([0.7, -0.7])  # Trap 1
+        c3 = np.array([-0.7, 0.7])  # Trap 2
+        c4 = np.array([-0.7, -0.7]) # Trap 3
         
+        # Distances
+        d1 = np.linalg.norm(actions - c1, axis=1)
+        d2 = np.linalg.norm(actions - c2, axis=1)
+        d3 = np.linalg.norm(actions - c3, axis=1)
+        d4 = np.linalg.norm(actions - c4, axis=1)
+        
+        # Thresholding (반지름 0.3 이내)
+        # 겹칠 일은 거의 없지만 우선순위 적용
+        rewards[d4 < 0.3] = 0.2
+        rewards[d3 < 0.3] = 0.4
+        rewards[d2 < 0.3] = 0.7
+        rewards[d1 < 0.3] = 1.0 # Optimal은 무조건 1.0
+
+    elif env_name == 'bandit-2': # Checkerboard
+        # Check Pattern
+        in_checker = (np.floor(x * 2) % 2 + np.floor(y * 2) % 2) % 2 == 0
+        
+        # 1. Optimal Zone: 우상단 박스 (0.5~1.0, 0.5~1.0)
+        is_optimal = (x > 0.5) & (x < 1.0) & (y > 0.5) & (y < 1.0)
+        
+        # 2. Sub-optimal: 나머지 체스판
+        is_subopt = in_checker & (~is_optimal)
+        
+        rewards[is_subopt] = 0.5
+        rewards[is_optimal] = 1.0
+
+    elif env_name == 'bandit-3': # Two Moons
+        # 1. Upper Moon Tip (Optimal)
+        t_tip = np.linspace(0, np.pi * 0.2, 50)
+        tip_x = (np.cos(t_tip) - 0.5) * 0.6
+        tip_y = (np.sin(t_tip) - 0.25) * 0.6
+        tip_arc = np.stack([tip_x, tip_y], axis=1)
+        dist_tip = np.min(np.linalg.norm(actions[:, None, :] - tip_arc[None, :, :], axis=2), axis=1)
+        
+        # 2. Rest of Upper Moon (Sub-optimal)
+        t_up = np.linspace(np.pi * 0.2, np.pi, 100)
+        up_x = (np.cos(t_up) - 0.5) * 0.6
+        up_y = (np.sin(t_up) - 0.25) * 0.6
+        up_arc = np.stack([up_x, up_y], axis=1)
+        dist_up = np.min(np.linalg.norm(actions[:, None, :] - up_arc[None, :, :], axis=2), axis=1)
+
+        # 3. Lower Moon (Bad Trap)
+        t_low = np.linspace(0, np.pi, 100)
+        low_x = (1 - np.cos(t_low) - 0.5) * 0.6
+        low_y = (1 - np.sin(t_low) - 0.5 - 0.25) * 0.6
+        low_arc = np.stack([low_x, low_y], axis=1)
+        dist_low = np.min(np.linalg.norm(actions[:, None, :] - low_arc[None, :, :], axis=2), axis=1)
+        
+        # Assign Rewards (Threshold 0.1)
+        rewards[dist_low < 0.1] = 0.2
+        rewards[dist_up < 0.1] = 0.6
+        rewards[dist_tip < 0.1] = 1.0 # Tip은 무조건 1.0
+
+    elif env_name == 'bandit-4': # Rings
+        r = np.linalg.norm(actions, axis=1)
+        theta = np.arctan2(actions[:, 1], actions[:, 0])
+        
+        # Conditions
+        is_inner = (r > 0.2) & (r < 0.4) # Inner Ring (r~0.3)
+        is_outer = (r > 0.7) & (r < 0.9) # Outer Ring (r~0.8)
+        is_quad1 = (theta > np.pi*2/6) & (theta < np.pi*3/6) # 1사분면
+        
+        rewards[is_inner] = 0.3
+        rewards[is_outer] = 0.6 # 일단 전체 Outer는 0.6
+        rewards[is_outer & is_quad1] = 1.0 # 1사분면 Outer만 1.0
+
+    elif env_name == 'bandit-5': # Spiral
+        # 1. Optimal Tip (t: 2.5 ~ 3.0)
+        t_tip = np.linspace(2.5, 3.0, 100)
+        tx = t_tip * np.cos(3 * t_tip) * 0.3
+        ty = t_tip * np.sin(3 * t_tip) * 0.3
+        tip_arc = np.stack([tx, ty], axis=1)
+        dist_tip = np.min(np.linalg.norm(actions[:, None, :] - tip_arc[None, :, :], axis=2), axis=1)
+        
+        # 2. Body (t: 0.5 ~ 2.5)
+        t_body = np.linspace(0.5, 2.5, 200)
+        bx = t_body * np.cos(3 * t_body) * 0.3
+        by = t_body * np.sin(3 * t_body) * 0.3
+        body_arc = np.stack([bx, by], axis=1)
+        dist_body = np.min(np.linalg.norm(actions[:, None, :] - body_arc[None, :, :], axis=2), axis=1)
+        
+        # Spiral 궤적 위에 있으면 점수 부여 (Continuous Gradient 느낌)
+        # 하지만 1.0은 Tip에만 부여
+        rewards[dist_body < 0.1] = 0.5 # 몸통은 0.5
+        rewards[dist_tip < 0.1] = 1.0  # 끝은 1.0
+
+    elif env_name == 'bandit-6': # High-Dim Clusters
+        centers = _get_bandit6_centers()
+        dists = np.linalg.norm(actions[:, None, :] - centers[None, :, :], axis=2) # (N, 9)
+        min_dists = np.min(dists, axis=1)
+        closest_idx = np.argmin(dists, axis=1)
+        
+        # Threshold 0.3 이내인 경우에만 점수 부여
+        valid_mask = min_dists < 0.3
+        
+        # 기본 점수 (Noise)
+        scores = np.full(len(actions), 0.0, dtype=np.float32)
+        
+        # 클러스터별 점수 매핑
+        # 0번: 1.0 (Optimal)
+        # 1번: 0.8
+        # 나머지: 0.1
+        cluster_scores = np.full(9, 0.1, dtype=np.float32)
+        cluster_scores[0] = 1.0
+        cluster_scores[1] = 0.8
+        
+        # 할당
+        # valid한 애들만 점수 줌
+        assigned_scores = cluster_scores[closest_idx]
+        rewards = np.where(valid_mask, assigned_scores, 0.0)
+
     return rewards
 
 
@@ -126,8 +289,12 @@ class ToyBanditEnv(gym.Env):
     def __init__(self, env_name, seed=0, render_mode=None):
         super().__init__()
         self.env_name = env_name
-        self.action_dim = 2
-        self.obs_dim = 2 
+        if env_name == 'bandit-6':
+            self.action_dim = 50
+            self.obs_dim = 2
+        else:
+            self.action_dim = 2
+            self.obs_dim = 2
         
         self.observation_space = spaces.Box(-1, 1, shape=(self.obs_dim,), dtype=np.float32)
         self.action_space = spaces.Box(-1, 1, shape=(self.action_dim,), dtype=np.float32)
@@ -141,6 +308,19 @@ class ToyBanditEnv(gym.Env):
         
         rng = np.random.RandomState(seed)
         self.gt_data = GENERATORS[env_name](2000, rng)
+
+        # 2. [New] PCA Initialization (Fixed Mapping)
+        self.pca = None
+        if self.action_dim > 2:
+            # GT 데이터를 기준으로 PCA 축을 학습(Fit)하고 고정합니다.
+            # 이렇게 하면 나중에 Agent가 생성한 데이터도 이 '고정된 축'으로 투영됩니다.
+            self.pca = PCA(n_components=2)
+            self.pca.fit(self.gt_data)
+            
+            # GT 데이터도 2D로 변환해 둡니다 (시각화용)
+            self.gt_data_2d = self.pca.transform(self.gt_data)
+        else:
+            self.gt_data_2d = self.gt_data
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -181,20 +361,37 @@ class ToyBanditEnv(gym.Env):
             self.fig, self.ax = plt.subplots(figsize=(5, 5))
             
         self.ax.clear()
-        self.ax.set_xlim(-1.1, 1.1)
-        self.ax.set_ylim(-1.1, 1.1)
-        self.ax.set_title(f"{self.env_name} (Last Batch)")
-        
+        if self.pca:
+            self.ax.set_xlim(-2, 2)
+            self.ax.set_ylim(-2, 2)
+        else:
+            self.ax.set_xlim(-1.1, 1.1)
+            self.ax.set_ylim(-1.1, 1.1)
+        title_str = f"{self.env_name} (Dim={self.action_dim})"
+        if self.pca: title_str += " [PCA Projected]"
+        self.ax.set_title(f"{title_str}")
+
         # 1. Background: Data Manifold (Ground Truth)
-        self.ax.scatter(self.gt_data[:, 0], self.gt_data[:, 1], c='gray', s=5, alpha=0.1, label='GT Data')
+        self.ax.scatter(self.gt_data_2d[:, 0], self.gt_data_2d[:, 1], 
+                        c='gray', s=10, alpha=0.1, label='Data Dist.')
+        # self.ax.scatter(self.gt_data[:, 0], self.gt_data[:, 1], c='gray', s=5, alpha=0.1, label='GT Data')
         
-        # 2. Background: Reward Region (Goal)
-        grid = np.linspace(-1, 1, 50)
-        gx, gy = np.meshgrid(grid, grid)
-        gpoints = np.vstack([gx.ravel(), gy.ravel()]).T
-        grewards = get_reward_batch(self.env_name, gpoints)
-        if grewards.sum() > 0:
-             self.ax.scatter(gpoints[grewards>0, 0], gpoints[grewards>0, 1], c='green', s=5, alpha=0.1, label='Goal')
+        # 2. Reward Region (Goal) - Bandit 6의 경우 Center 0
+        if self.env_name == 'bandit-6':
+            centers = _get_bandit6_centers()
+            target_50d = centers[0:1] # (1, 50)
+            # Target도 PCA로 변환해서 찍어야 함
+            target_2d = self.pca.transform(target_50d)
+            self.ax.scatter(target_2d[:, 0], target_2d[:, 1], 
+                            c='green', marker='*', s=300, label='Optimal (Hidden)', edgecolors='black')
+        else:
+            # 2. Background: Reward Region (Goal)
+            grid = np.linspace(-1, 1, 50)
+            gx, gy = np.meshgrid(grid, grid)
+            gpoints = np.vstack([gx.ravel(), gy.ravel()]).T
+            grewards = get_reward_batch(self.env_name, gpoints)
+            if grewards.sum() > 0:
+                self.ax.scatter(gpoints[grewards>0, 0], gpoints[grewards>0, 1], c='green', s=5, alpha=0.1, label='Goal')
 
         # 3. Foreground: Agent Actions (Batch Scatter)
         if self.last_actions is not None:
@@ -204,10 +401,15 @@ class ToyBanditEnv(gym.Env):
             
             # 보상에 따라 색상 구분 (성공: 빨강, 실패: 파랑)
             # matplotlib scatter는 색상 배열을 받을 수 있음
-            colors = np.where(rewards > 0, 'red', 'blue')
+            colors = np.where(rewards == 1, 'red', 'blue')
             
+            if self.pca:
+                actions_2d = self.pca.transform(actions)
+            else:
+                actions_2d = actions
+
             self.ax.scatter(
-                actions[:, 0], actions[:, 1], 
+                actions_2d[:, 0], actions_2d[:, 1], 
                 c=colors, 
                 s=30,       # 점 크기
                 marker='x', # 마커 모양
@@ -253,7 +455,7 @@ def make_bandit_datasets(env_name, dataset_size=100000, seed=0):
     next_observations = np.zeros_like(observations)
     
     # Bandit이므로 매 스텝 종료 (Terminal=1, Mask=0)
-    terminals = np.ones(dataset_size, dtype=np.float32)
+    terminals = np.zeros(dataset_size, dtype=np.float32)
     masks = np.zeros(dataset_size, dtype=np.float32)
     
     data_dict = {
@@ -267,9 +469,11 @@ def make_bandit_datasets(env_name, dataset_size=100000, seed=0):
     
     # Dataset 객체 반환
     dataset = Dataset.create(**data_dict)
+
+    sr = (rewards == 1.0).sum() / (rewards > -1).sum()
     
     print(f"Dataset ({env_name}) Created: {dataset_size} samples")
-    print(f" - Success Rate: {rewards.mean()*100:.2f}%")
+    print(f"SR - : {sr*100:.2f}%")
     
     # main.py의 구조에 맞춰 env, eval_env, train_dataset, val_dataset(None) 반환
     return dataset
@@ -325,7 +529,7 @@ def evaluate(
     _, rewards, _, _, _ = env.step(actions)
 
     # 4. Calculate Metrics
-    success_rate = np.mean(rewards) # Reward는 0 or 1
+    success_rate = np.sum(rewards==1.0) / np.ones_like(rewards).sum() # Reward는 0 or 1
     avg_reward = np.mean(rewards)
     
     stats = {

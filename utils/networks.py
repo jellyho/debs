@@ -293,7 +293,7 @@ class ActorVectorField(nn.Module):
             self.ff = FourierFeatures(self.fourier_feature_dim)
 
     @nn.compact
-    def __call__(self, observations, actions, v_base=None, times=None, is_encoded=False):
+    def __call__(self, observations, actions, times=None, v_base=None, is_encoded=False):
         """Return the vectors at the given states, actions, and times (optional).
 
         Args:
@@ -376,7 +376,7 @@ class AdvantageConditionedActorVectorField(nn.Module):
             )
 
     @nn.compact
-    def __call__(self, observations, actions, advantage=None, times=None, is_encoded=False):
+    def __call__(self, observations, actions, advantage, times, mask, is_encoded=False):
         """
         Return the vectors at the given states, actions, advantage, and times.
 
@@ -386,29 +386,28 @@ class AdvantageConditionedActorVectorField(nn.Module):
             advantage: Advantage scalars (Batch,) or (Batch, 1).
                        Expected to be bounded (e.g., [-1, 1] or [0, 1]).
             times: Times (optional).
+            mask: Bool (True for masking (concond), False for conditioning)
             is_encoded: Whether the observations are already encoded.
         """
         # 1. Encode observations if necessary
         if not is_encoded and self.encoder is not None:
             observations = self.encoder(observations)
+
+        null_embedding = jnp.broadcast_to(
+            self.null_embedding,
+            (*observations.shape[:-1], self.advantage_fourier_feature_dim)
+        )
+
+        adv_embedding = self.adv_ff(advantage)
+
+        g_embedding = jnp.where(
+            mask.astype(jnp.bool), 
+            null_embedding,
+            adv_embedding
+        )
             
-        # 2. Process Advantage
-        # Ensure advantage has a channel dimension: (Batch,) -> (Batch, 1)
-        if advantage is None:
-            batch_size = observations.shape[0]
-
-            adv_embedding = jnp.broadcast_to(
-                self.null_embedding,
-                (batch_size, self.advantage_fourier_feature_dim)
-            )
-        else:
-            # Apply Fourier embedding to the advantage scalar
-            # This expands (Batch, 1) -> (Batch, advantage_fourier_feature_dim)
-            adv_embedding = self.adv_ff(advantage)
-
         # 3. Construct Input List
-        # Concatenate: [Observation, Action, Advantage_Embedding]
-        inputs_list = [observations, actions, adv_embedding]
+        inputs_list = [observations, actions, g_embedding]
 
         # 4. Process Time (if provided)
         if times is not None:
