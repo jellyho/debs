@@ -145,26 +145,6 @@ class DEBSAgent(flax.struct.PyTreeNode):
             'g/hist': g
         }
 
-    def _compute_distributional_advantage(self, z_q, z_v):
-        """
-        z_q: (Batch, N) -> r + gamma * V(s') 분포 (Target Q)
-        z_v: (Batch, N) -> V(s) 분포 (Baseline)
-        """
-        
-        # Q의 모든 입자와 V의 모든 입자를 1:1로 싸우게 합니다.
-        # Broadcasting: (B, N, 1) vs (B, 1, N) -> (B, N, N) Matrix
-        
-        # "Q의 i번째 입자가 V의 j번째 입자보다 큰가?"
-        # Tie-breaking을 위해 Strict Inequality (>) 사용
-        # Choose target (expectile or entire disstribution?)
-        is_better_matrix = (z_q[..., :, None] > z_v[..., None, :]) # (Batch, N, N)
-        
-        # 모든 승패의 평균을 구합니다.
-        # 이는 수학적으로 P(Z_Q > Z_V)와 동일합니다.
-        g = jnp.mean(is_better_matrix, axis=(-1, -2)) # (Batch,)
-        
-        return g
-
     def _compute_normalized_advantage(self, batch, params):
         """
         Computes the percentile rank of Target T within the predicted distribution Z(s).
@@ -195,32 +175,10 @@ class DEBSAgent(flax.struct.PyTreeNode):
             next_z = next_zs.mean(axis=0)
         else:
             next_z = next_zs
-
-        tau = self.config.get('expectile_tau', 0.9)
-        next_z_sorted = jnp.sort(next_z, axis=-1)
-        idx = int(self.config['num_quantiles'] * tau)
-        # next_v = next_z_sorted[..., idx]
-        # next_z_mean = next_z.mean(axis=-1)
-        # next_v = next_z_mean
         
         T = batch['rewards'][..., -1][..., None] + \
             (self.config['discount'] ** self.config["horizon_length"]) * \
             batch['masks'][..., -1][..., None] * next_z
-        
-        g = self._compute_distributional_advantage(T, z_sorted)[..., None]
-            
-        # Shape Check: T -> (Batch, 1)
-        # if T.ndim == 1:
-        #     T = T[..., None]
-
-        # 3. Compute Percentile Rank (g)
-        # "T보다 작은 quantile이 몇 개인가?" / "전체 개수"
-        # Broadcasting: T (B, 1) vs z_sorted (B, N)
-        # count: (B, N) -> sum -> (B,)
-        
-        # Soft Indicator function (Sigmoid) for differentiability (optional) 
-        # or Hard Indicator (Heaviside)
-        # Hard Indicator is fine since we don't need gradients flowing back to T here
         
         # (B, 1) > (B, N) -> (B, N) boolean
         is_greater = (T >= z_sorted)
@@ -230,12 +188,8 @@ class DEBSAgent(flax.struct.PyTreeNode):
         
         # 4. Scale to [-1, 1] (Optional, if you prefer centered range)
         g = 2.0 * g - 1.0
-        
-        # Ensure shape (Batch, 1)
-        if g.ndim == 1:
-            g = g[..., None]
             
-        return jax.lax.stop_gradient(g)
+        return jax.lax.stop_gradient(g)[..., None]
 
     @jax.jit
     def total_critic_loss(self, batch, grad_params, rng=None):

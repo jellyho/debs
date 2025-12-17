@@ -13,5 +13,10 @@ python main.py \
     --video_episodes 10 \
     --offline_steps 100000 \
     --save_dir "exp/" \
-    --agent.alpha 0.05 \
-    --agent.cfg 1.0
+    --agent.v_min=0.0 \
+    --agent.num_bins=101 \
+    --agent.v_max=1.0 \
+    --agent.mf_method='jit_mf' \
+    --agent.num_critic=2 \
+    # --agent.noisy_actor=True
+    # --agent.target_mode='mean'

@@ -87,3 +87,4 @@ zipp==3.21.0
 h5py
 robomimic
 wandb[media]
+opencv-python

@@ -110,7 +110,10 @@ def evaluate(
 
             if should_render and (step % video_frame_skip == 0 or done):
                 frame = env.render().copy()
-                mean_value = np.array(value.mean())
+                if 'hl' in agent.config['agent_name']:
+                    mean_value = np.array(agent._logit_to_scalar(value).mean())
+                else:
+                    mean_value = np.array(value.mean())
                 cv2.putText(frame, f"Value : {mean_value}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
                 render.append(frame)
 

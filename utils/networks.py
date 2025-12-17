@@ -228,7 +228,7 @@ class QuantileValue(nn.Module):
 
     hidden_dims: Sequence[int]
     layer_norm: bool = True
-    num_ensembles: int = 2
+    num_ensembles: int = 1
     num_quantiles: int = 32  # <-- The new crucial attribute
     encoder: nn.Module = None
 
@@ -247,7 +247,7 @@ class QuantileValue(nn.Module):
         )
         self.value_net = value_net
 
-    def __call__(self, observations: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, observations: jnp.ndarray, actions=None) -> jnp.ndarray:
         """Return quantile values Z(s).
 
         Args:
@@ -262,6 +262,9 @@ class QuantileValue(nn.Module):
             inputs = [self.encoder(observations)]
         else:
             inputs = [observations]
+
+        if actions is not None:
+            inputs.append(actions)
             
         inputs = jnp.concatenate(inputs, axis=-1)
 
@@ -269,6 +272,41 @@ class QuantileValue(nn.Module):
         z_quantiles = self.value_net(inputs)
         
         return z_quantiles
+
+class ActorZ(nn.Module):
+    """Actor vector field network for flow matching.
+
+    Attributes:
+        hidden_dims: Hidden layer dimensions.
+        action_dim: Action dimension.
+        layer_norm: Whether to apply layer normalization.
+        encoder: Optional encoder module to encode the inputs.
+    """
+
+    hidden_dims: Sequence[int]
+    action_dim: int
+    layer_norm: bool = False
+    encoder: nn.Module = None
+
+    def setup(self) -> None:
+        self.mlp = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
+
+    @nn.compact
+    def __call__(self, observations, is_encoded=False):
+        """Return the vectors at the given states, actions, and times (optional).
+
+        Args:
+            observations: Observations.
+            actions: Actions.
+            times: Times (optional).
+            is_encoded: Whether the observations are already encoded.
+        """
+        if not is_encoded and self.encoder is not None:
+            observations = self.encoder(observations)
+
+        z = self.mlp(observations)
+
+        return z
 
 class ActorVectorField(nn.Module):
     """Actor vector field network for flow matching.
@@ -293,7 +331,7 @@ class ActorVectorField(nn.Module):
             self.ff = FourierFeatures(self.fourier_feature_dim)
 
     @nn.compact
-    def __call__(self, observations, actions, times=None, v_base=None, is_encoded=False):
+    def __call__(self, observations, actions=None, times=None, v_base=None, is_encoded=False):
         """Return the vectors at the given states, actions, and times (optional).
 
         Args:
@@ -307,10 +345,10 @@ class ActorVectorField(nn.Module):
             observations = self.encoder(observations)
         inputs.append(observations)
 
-        if times is None:
+        if actions is not None:
             inputs.append(actions)
-        else:
-            inputs.append(actions)
+
+        if times is not None:
             if self.use_fourier_features:
                 times = self.ff(times)
             inputs.append(times)
@@ -414,6 +452,63 @@ class AdvantageConditionedActorVectorField(nn.Module):
             if self.use_fourier_features:
                 times = self.ff(times)
             inputs_list.append(times)
+
+        # 5. Concatenate all inputs along the last dimension
+        inputs = jnp.concatenate(inputs_list, axis=-1)
+
+        # 6. Pass through the MLP
+        v = self.mlp(inputs)
+
+        return v
+
+class ActorMeanFlowField(nn.Module):
+    """
+    Actor vector field network that conditions on an 'advantage' scalar.
+    
+    This network uses Fourier Features to embed the advantage value.
+    Since deep networks tend to be biased towards low-frequency functions (Spectral Bias),
+    directly concatenating a scalar advantage value often leads to poor conditioning.
+    Projecting the bounded advantage value into a higher-dimensional Fourier space
+    helps the network capture high-frequency dependencies on the advantage.
+
+    Attributes:
+        hidden_dims: Hidden layer dimensions.
+        action_dim: Action dimension.
+        layer_norm: Whether to apply layer normalization.
+        encoder: Optional encoder module to encode the inputs.
+    """
+
+    hidden_dims: Sequence[int]
+    action_dim: int
+    layer_norm: bool = False
+    encoder: nn.Module = None
+
+    def setup(self) -> None:
+        # Standard MLP for the vector field
+        self.mlp = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
+
+    @nn.compact
+    def __call__(self, observations, actions, r, t, g=None, is_encoded=False):
+        """
+        Return the vectors at the given states, actions, advantage, and times.
+
+        Args:
+            observations: Observations (Batch, Obs_Dim).
+            actions: Actions (Batch, Act_Dim).
+            r: r
+            t: Times (optional).
+            mask: Bool (True for masking (concond), False for conditioning)
+            is_encoded: Whether the observations are already encoded.
+        """
+        # 1. Encode observations if necessary
+        if not is_encoded and self.encoder is not None:
+            observations = self.encoder(observations)
+
+        # 3. Construct Input List
+        inputs_list = [observations, actions, r, t]
+
+        if g is not None:
+            inputs_list.append(g)
 
         # 5. Concatenate all inputs along the last dimension
         inputs = jnp.concatenate(inputs_list, axis=-1)

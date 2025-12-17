@@ -26,7 +26,6 @@ flags.DEFINE_string('env_name', 'cube-triple-play-singletask-task2-v0', 'Environ
 flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
 
 flags.DEFINE_integer('offline_steps', 1000000, 'Number of online steps.')
-# flags.DEFINE_integer('online_steps', 1000000, 'Number of online steps.')
 flags.DEFINE_integer('buffer_size', 2000000, 'Replay buffer size.')
 flags.DEFINE_integer('log_interval', 5000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 100000, 'Evaluation interval.')
@@ -49,7 +48,6 @@ flags.DEFINE_string('ogbench_dataset_dir', None, 'OGBench dataset directory')
 
 flags.DEFINE_integer('horizon_length', 5, 'action chunking length.')
 flags.DEFINE_bool('sparse', False, "make the task sparse reward")
-
 flags.DEFINE_bool('save_all_online_states', False, "save all trajectories to npy")
 
 class LoggingHelper:
@@ -74,6 +72,8 @@ def main(_):
     exp_name = get_exp_name(FLAGS.seed)
     run = setup_wandb(project='debs', group=FLAGS.run_group, name=exp_name)
     run.tags = run.tags + (FLAGS.env_name,)
+    if FLAGS.agent.agent_name == 'hlmeanflow':
+        run.tags = run.tags + (FLAGS.agent.mf_method,)
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
     flag_dict = get_flag_dict()
@@ -110,7 +110,7 @@ def main(_):
     config["horizon_length"] = FLAGS.horizon_length
 
     # handle dataset
-    def process_train_dataset(ds):
+    def process_train_dataset(dataset):
         """
         Process the train dataset to 
             - handle dataset proportion
@@ -118,31 +118,57 @@ def main(_):
             - convert to action chunked dataset
         """
 
-        ds = Dataset.create(**ds)
+        dataset = Dataset.create(**dataset)
         if FLAGS.dataset_proportion < 1.0:
-            new_size = int(len(ds['masks']) * FLAGS.dataset_proportion)
-            ds = Dataset.create(
-                **{k: v[:new_size] for k, v in ds.items()}
+            new_size = int(len(dataset['masks']) * FLAGS.dataset_proportion)
+            dataset = Dataset.create(
+                **{k: v[:new_size] for k, v in dataset.items()}
             )
         
         if is_robomimic_env(FLAGS.env_name):
-            penalty_rewards = ds["rewards"] - 1.0
-            ds_dict = {k: v for k, v in ds.items()}
+            penalty_rewards = dataset["rewards"] - 1.0
+            ds_dict = {k: v for k, v in dataset.items()}
             ds_dict["rewards"] = penalty_rewards
             ds = Dataset.create(**ds_dict)
         
         if FLAGS.sparse:
             # Create a new dataset with modified rewards instead of trying to modify the frozen one
-            sparse_rewards = (ds["rewards"] != 0.0) * -1.0
-            ds_dict = {k: v for k, v in ds.items()}
+            sparse_rewards = (dataset["rewards"] != 0.0) * -1.0
+            ds_dict = {k: v for k, v in dataset.items()}
             ds_dict["rewards"] = sparse_rewards
-            ds = Dataset.create(**ds_dict)
+            dataset = Dataset.create(**ds_dict)
 
-        return ds
+        dataset.actor_action_sequence = ( FLAGS.horizon_length )
+        dataset.critic_action_sequence = ( FLAGS.horizon_length )
+        dataset.nstep = 1
+        dataset.discount = FLAGS.discount
+        dataset.discount2 = FLAGS.discount
+        # dataset.discount2 = config['discount']
+        # dataset.normalize_rewards = FLAGS.normalize_rewards
+        # dataset.additional_normalize_rewards = FLAGS.additional_normalize_rewards
+        # dataset.additional_normalize_rewards_scale = FLAGS.additional_normalize_rewards_scale
+        # if config['agent_name'] == 'rebrac' or config['agent_name'] == 'sarsa_fql':
+        #     dataset.return_next_actions = True
+        if 'bandit' in FLAGS.env_name:
+            dataset.v_max = 1
+            dataset.v_min = 0
+        elif 'singletask' in FLAGS.env_name:
+            dataset.v_min = 1 / (1 - dataset.discount) * dataset['rewards'].min().item()
+            dataset.v_max = 0
+        return dataset
     
     train_dataset = process_train_dataset(train_dataset)
-    example_batch = train_dataset.sample(())
-    
+    example_batch = train_dataset.sample(config['batch_size'])
+
+    config['v_min'] = train_dataset.v_min
+    config['v_max'] = train_dataset.v_max
+
+    for k, v in example_batch.items():
+        try:
+            print(f"{k}: {v.shape}")
+        except:
+            pass
+
     agent_class = agents[config['agent_name']]
     agent = agent_class.create(
         FLAGS.seed,
@@ -160,99 +186,104 @@ def main(_):
         wandb_logger=wandb,
     )
 
-
     # Offline RL
     for i in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):
         log_step += 1
+        # batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
+        batch = train_dataset.sample(config['batch_size'])
 
-        if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % FLAGS.dataset_replace_interval == 0:
-            dataset_idx = (dataset_idx + 1) % len(dataset_paths)
-            print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
-            train_dataset, val_dataset = make_ogbench_env_and_datasets(
-                FLAGS.env_name,
-                dataset_path=dataset_paths[dataset_idx],
-                compact_dataset=False,
-                dataset_only=True,
-                cur_env=env,
-            )
-            train_dataset = process_train_dataset(train_dataset)
-
-        batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
-
-        if config['agent_name'] in ['debs', 'cfgrl']:
-            agent, offline_info = agent.critic_update(batch)
+        if config['agent_name'] in ['hldebs', 'debs', 'cfgrl', 'hlcfgrl']:
+            agent, info = agent.critic_update(batch)
         else:
             agent, info = agent.update(batch)
 
         if i % FLAGS.log_interval == 0:
-            if config['agent_name'] in ['debs', 'cfgrl']:
-                logger.log(offline_info, step=log_step)
-            else:
-                logger.log(info, step=log_step)
+            logger.log(info, step=log_step)
         
         # saving
         if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
             save_agent(agent, FLAGS.save_dir, log_step)
 
-    for i in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):
-        log_step += 1
+        if 'hlmeanflow' in config['agent_name']:
+            if i == FLAGS.offline_steps - 1 or \
+                (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
+                # during eval, the action chunk is executed fully
+                if "bandit" in FLAGS.env_name:
+                    from envs.bandit_utils import evaluate
+                    eval_info, _, _ = evaluate(
+                        agent=agent,
+                        env=eval_env,
+                        action_dim=example_batch["actions"].shape[-1],
+                        num_eval_episodes=FLAGS.eval_episodes,
+                        num_video_episodes=FLAGS.video_episodes,
+                        video_frame_skip=FLAGS.video_frame_skip,
+                    )
+                    logger.log(eval_info, log_step, "eval")
+                else:
+                    from evaluation import evaluate
+                    eval_info, _, video = evaluate(
+                        agent=agent,
+                        env=eval_env,
+                        action_dim=example_batch["actions"].shape[-1],
+                        num_eval_episodes=FLAGS.eval_episodes,
+                        num_video_episodes=FLAGS.video_episodes,
+                        video_frame_skip=FLAGS.video_frame_skip,
+                    )
+                    logger.log(eval_info, log_step, "eval")
+                    wandb.log({
+                        f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
+                    }, step=log_step)
+    if not 'hlmeanflow' in config['agent_name']:
+        for i in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):
+            log_step += 1
+            # batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
+            batch = train_dataset.sample(config['batch_size'])
 
-        if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % FLAGS.dataset_replace_interval == 0:
-            dataset_idx = (dataset_idx + 1) % len(dataset_paths)
-            print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
-            train_dataset, val_dataset = make_ogbench_env_and_datasets(
-                FLAGS.env_name,
-                dataset_path=dataset_paths[dataset_idx],
-                compact_dataset=False,
-                dataset_only=True,
-                cur_env=env,
-            )
-            train_dataset = process_train_dataset(train_dataset)
+            info = None
+            if config['agent_name'] in ['hldebs', 'debs', 'cfgrl', 'hlcfgrl']:
+                agent, info = agent.actor_update(batch)
+            elif config['agent_name'] in ['resf', 'addf']:
+                agent, info = agent.residual_actor_update(batch)
+            # elif config['agent_name']  in ['hlmeanflow']:
+            #     agent, info = agent.latent_actor_update(batch)
 
-        batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
+            if info is not None:
+                if i % FLAGS.log_interval == 0:
+                    logger.log(info, step=log_step)
+            
+            # saving
+            if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
+                save_agent(agent, FLAGS.save_dir, log_step)
 
-        if config['agent_name'] in ['debs', 'cfgrl']:
-            agent, offline_info = agent.actor_update(batch)
-            if i % FLAGS.log_interval == 0:
-                logger.log(offline_info, step=log_step)
-        elif config['agent_name'] in ['resf', 'addf']:
-            agent, offline_info = agent.residual_actor_update(batch)
-            if i % FLAGS.log_interval == 0:
-                logger.log(offline_info, step=log_step)
-        
-        # saving
-        if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
-            save_agent(agent, FLAGS.save_dir, log_step)
-
-        # eval
-        if i == FLAGS.offline_steps - 1 or \
-            (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
-            # during eval, the action chunk is executed fully
-            if "bandit" in FLAGS.env_name:
-                from envs.bandit_utils import evaluate
-                eval_info, _, _ = evaluate(
-                    agent=agent,
-                    env=eval_env,
-                    action_dim=example_batch["actions"].shape[-1],
-                    num_eval_episodes=FLAGS.eval_episodes,
-                    num_video_episodes=FLAGS.video_episodes,
-                    video_frame_skip=FLAGS.video_frame_skip,
-                )
-                logger.log(eval_info, log_step, "eval")
-            else:
-                from evaluation import evaluate
-                eval_info, _, video = evaluate(
-                    agent=agent,
-                    env=eval_env,
-                    action_dim=example_batch["actions"].shape[-1],
-                    num_eval_episodes=FLAGS.eval_episodes,
-                    num_video_episodes=FLAGS.video_episodes,
-                    video_frame_skip=FLAGS.video_frame_skip,
-                )
-                logger.log(eval_info, log_step, "eval")
-                wandb.log({
-                    f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
-                }, step=log_step)
+            # eval
+            if i == FLAGS.offline_steps - 1 or \
+                (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
+                # during eval, the action chunk is executed fully
+                if "bandit" in FLAGS.env_name:
+                    from envs.bandit_utils import evaluate
+                    eval_info, _, _ = evaluate(
+                        agent=agent,
+                        env=eval_env,
+                        action_dim=example_batch["actions"].shape[-1],
+                        num_eval_episodes=FLAGS.eval_episodes,
+                        num_video_episodes=FLAGS.video_episodes,
+                        video_frame_skip=FLAGS.video_frame_skip,
+                    )
+                    logger.log(eval_info, log_step, "eval")
+                else:
+                    from evaluation import evaluate
+                    eval_info, _, video = evaluate(
+                        agent=agent,
+                        env=eval_env,
+                        action_dim=example_batch["actions"].shape[-1],
+                        num_eval_episodes=FLAGS.eval_episodes,
+                        num_video_episodes=FLAGS.video_episodes,
+                        video_frame_skip=FLAGS.video_frame_skip,
+                    )
+                    logger.log(eval_info, log_step, "eval")
+                    wandb.log({
+                        f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
+                    }, step=log_step)
 
 if __name__ == '__main__':
     app.run(main)

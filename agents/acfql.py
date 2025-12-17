@@ -281,7 +281,6 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             encoder=encoders.get('actor_onestep_flow'),
         )
 
-        
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
             actor_onestep_flow=(actor_onestep_flow_def, (ex_observations, full_actions)),

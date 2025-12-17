@@ -10,8 +10,9 @@ import optax
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import AdvantageConditionedActorVectorField, QuantileValue
+from utils.hlg import _normal_cdf_log_difference
 
-class CFGRLAgent(flax.struct.PyTreeNode):
+class HLCFGRLAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
     """
 
@@ -21,114 +22,92 @@ class CFGRLAgent(flax.struct.PyTreeNode):
 
     def critic_loss(self, batch, grad_params, rng):
         """Compute the behavior policy evaluation loss"""
+        target_v = self._compute_scalar_target(batch) # B, 1
 
-        target_z = self._compute_target_quantiles(batch) # B, Q
-        current_zs = self.network.select('critic')(batch['observations'], params=grad_params) # B, Q
-        critic_loss = self._compute_quantile_loss(
-            current_zs, target_z, batch['valid'][..., -1]
+        target_probs = self._scalar_to_prob(target_v)
+
+        current_logits = self.network.select('critic')(
+            batch['observations'],
+            params=grad_params
+        ) # B, Q
+
+        critic_loss = self._compute_dist_loss(
+            current_logits, target_probs, batch['valid'][..., -1]
         )
 
-        avg_z = current_zs.mean(axis=0)  # (Batch, Num_Quantiles)
+        current_v = self._logit_to_scalar(current_logits)
 
         return critic_loss, {
             'critic_loss': critic_loss,
-            'v_mean': avg_z.mean(),
-            'v_max': avg_z[..., -1].mean(),
-            'v_min': avg_z[..., 0].mean(),
+            'v_mean': current_v.mean(),
+            'v_max': current_v.max(),
+            'v_min': current_v.min(),
+            'target_v_hist': target_v,
         }
 
-    def _compute_target_quantiles(self, batch):
-        # 1. Get Next State Distribution
-        next_zs = self.network.select(f'target_critic')(
+    def _prob_to_scalar(self, dist_probs):
+        """Convert distributional probabilities to scalar value."""
+        support = jnp.linspace(
+            self.config['v_min'], self.config['v_max'], self.config['num_bins'] + 1
+        )
+        centers = (support[:-1] + support[1:]) / 2
+        scalar_value = jnp.sum(dist_probs * centers, axis=-1)
+        return scalar_value
+
+    def _logit_to_scalar(self, dist_logits):
+        """Convert distributional probabilities to scalar value."""
+        dist_probs = jax.nn.softmax(dist_logits, axis=-1)
+        scalar_value = self._prob_to_scalar(dist_probs)
+        return scalar_value
+
+    def _scalar_to_prob(self, target_scalar):
+        sigma = self.config['sigma'] * (self.config['v_max'] - self.config['v_min']) / (self.config['num_bins'] + 1)
+
+        support = jnp.linspace(
+            self.config['v_min'], self.config['v_max'], self.config['num_bins'] + 1
+        )
+
+        bin_log_probs = _normal_cdf_log_difference(
+            (support[1:] - target_scalar) / (jnp.sqrt(2) * sigma),
+            (support[:-1] - target_scalar) / (jnp.sqrt(2) * sigma),
+        )
+        log_z = _normal_cdf_log_difference(
+            (support[-1] - target_scalar) / (jnp.sqrt(2) * sigma),
+            (support[0] - target_scalar) / (jnp.sqrt(2) * sigma),
+        )
+
+        return jax.lax.stop_gradient(jnp.exp(bin_log_probs - log_z))
+
+    def _compute_scalar_target(self, batch):
+        """Calculates the scalar Bellman target: r + gamma * E[V(s')]"""
+        
+        # 1. Get Next State Distribution (Logits)
+        next_logits = self.network.select(f'target_critic')(
             batch['next_observations'][..., -1, :]
         )
-        
-        # 2. Aggregate Ensembles (Mixture)
-        if self.config['num_qs'] > 1:
-            # 기본적으로는 mean으로 섞습니다.
-            next_z_dist = next_zs.mean(axis=0) 
-        else:
-            next_z_dist = next_zs
 
-        # -------------------------------------------------------
-        # [New] Plug-and-Play Target Selection
-        # -------------------------------------------------------
-        target_mode = self.config.get('target_mode', 'mean') # 'mean' or 'expectile'
+        next_v = self._logit_to_scalar(next_logits)
         
-        if target_mode == 'mean':
-            # [Standard DEBS] SARSA Style
-            # 분포의 평균(Expectation)을 사용 -> Behavior Value
-            next_v = next_z_dist.mean(axis=-1)
-            
-        elif target_mode == 'expectile':
-            # [Optimistic DEBS] IQL Style
-            # 분포의 상위권(Expectile)을 사용 -> Optimal Value Approximation
-            # Quantile 분포에서 Expectile을 구하는 것은
-            # 단순히 상위 tau% 지점의 값을 취하는 것과 유사합니다.
-            tau = self.config.get('expectile_tau', 0.9) # 예: 0.9
-            
-            # 정렬 후 해당 인덱스 선택 (Quantile function)
-            sorted_z = jnp.sort(next_z_dist, axis=-1)
-            idx = int(self.config['num_quantiles'] * tau)
-            next_v = sorted_z[..., idx]
-            
-        # 3. Bellman Update
+        # 3. Bellman Update (Scalar)
         T = batch['rewards'][..., -1] + \
             (self.config['discount'] ** self.config["horizon_length"]) * \
             batch['masks'][..., -1] * next_v
             
-        # Quantile Regression을 하려면 Target은 (Batch, 1) 이고
-        # 이를 N번 복사해서 모든 Quantile이 이 Target을 맞추도록 해야 함
         if T.ndim == 1:
             T = T[..., None]
             
         return jax.lax.stop_gradient(T)
 
-    def _compute_quantile_loss(self, current_zs, target_z, valid_mask):
+    def _compute_dist_loss(self, current_logits, target_probs, valid_mask):
         """
-        current_zs: (Batch, Num_Quantiles)
-        target_z: (Batch, Num_Quantiles)
+        current_zs: (Batch, Num_Bins)
+        target_z: (Batch, Num_Bins)
         """
-        num_quantiles = self.config['num_quantiles']
+        log_probs = jax.nn.log_softmax(current_logits, axis=-1)
+        ce_loss = -jnp.sum(target_probs * log_probs, axis=-1)
+        critic_loss = (ce_loss * valid_mask).mean()
         
-        # Tau: (Num_Quantiles,)
-        tau = (jnp.arange(num_quantiles, dtype=jnp.float32) + 0.5) / num_quantiles
-        
-        # Loss function for a single ensemble member
-        # pred_z: (Batch, N), tgt_z: (Batch, N)
-        # def single_ensemble_loss_fn(pred_z, tgt_z):
-        #     # Calculate Pairwise Difference
-        #     # (Batch, N, 1) - (Batch, 1, N) -> (Batch, N, N)
-        u = target_z[..., None, :] - current_zs[..., :, None]
-        
-        # Huber Loss
-        kappa = 1.0
-        abs_u = jnp.abs(u)
-        huber_loss = jnp.where(
-            abs_u <= kappa, 
-            0.5 * u**2, 
-            kappa * (abs_u - 0.5 * kappa)
-        )
-        
-        # Quantile Weighting
-        weights = jnp.abs(tau[..., None] - (u < 0).astype(jnp.float32))
-        element_wise_loss = weights * huber_loss
-        
-        # Sum over targets (last dim), Mean over predictions (2nd to last)
-        total_loss = element_wise_loss.sum(axis=-1).mean(axis=-1)
-
-        # Vectorize over axis 0 (Ensemble Dimension) of current_zs
-        # target_z is broadcasted to all ensembles (in_axes=None)
-        # per_ensemble_losses = jax.vmap(single_ensemble_loss_fn, in_axes=(0, None))(current_zs, target_z)
-        
-        # Sum losses across ensembles (axis 0)
-        # Result Shape: (Batch,)
-        # total_loss = per_ensemble_losses.sum(axis=0)
-        
-        # Apply mask and mean
-        masked_loss = (total_loss * valid_mask).mean()
-        
-        return masked_loss
+        return critic_loss
 
     def actor_loss(self, batch, grad_params, rng):
         """Compute the FQL actor loss."""
@@ -147,10 +126,12 @@ class CFGRLAgent(flax.struct.PyTreeNode):
 
         uncond_mask = jax.random.bernoulli(drop_rng, p=self.config['cfg_dropout'], shape=(batch_size, 1))
 
+        coeff = jnp.where(uncond_mask, 1.0, g >= 0.0).astype(jnp.float32)
+
         pred_cond = self.network.select('actor_bc_flow')(
-            batch['observations'],
-            x_t,
-            advantage=g,
+            batch['observations'], 
+            x_t, 
+            advantage=g, 
             times=t,
             mask=uncond_mask,
             params=grad_params
@@ -160,10 +141,10 @@ class CFGRLAgent(flax.struct.PyTreeNode):
             jnp.reshape(
                 (pred_cond - vel) ** 2, 
                 (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
-            ) * batch["valid"][..., None]
+            ) * batch["valid"][..., None] * coeff[..., None]
         )
 
-        bc_flow_loss = bc_flow_loss_cond
+        bc_flow_loss = bc_flow_loss_cond 
 
         return bc_flow_loss, {
             'actor_loss': bc_flow_loss,
@@ -176,48 +157,39 @@ class CFGRLAgent(flax.struct.PyTreeNode):
 
     def _compute_normalized_advantage(self, batch, params):
         """
-        Computes the percentile rank of Target T within the predicted distribution Z(s).
-        g \in [0, 1] (0: Worst, 0.5: Median, 1: Best)
-        This is robust to scale and distribution shape.
+        Computes Percentile Rank (g) using the learned distribution's CDF.
+        g = P(Z < T) where T is the target return.
         """
-        # 1. Get Current State Value Distribution Z(s)
-        # Shape: (Num_Ensembles, Batch, Num_Quantiles)
-        zs = self.network.select('critic')(batch['observations'], params=params)
-        
-        # Aggregate Ensembles
-        if self.config['num_qs'] > 1:
-            # Use mean distribution for stability
-            z = zs.mean(axis=0) 
-        else:
-            z = zs
-        
-        # Sort quantiles just in case (Batch, N)
-        z_sorted = jnp.sort(z, axis=-1)
-        
-        # 2. Calculate Target Return T
-        # (이전과 동일한 로직)
-        next_zs = self.network.select('target_critic')(
-            batch['next_observations'][..., -1, :], 
-        )
+        # 1. Get Current V(s) Distribution
+        logits = self.network.select('critic')(batch['observations'], params=params)
+        # probs = jax.nn.softmax(logits, axis=-1)
         
         if self.config['num_qs'] > 1:
-            next_z = next_zs.mean(axis=0)
-        else:
-            next_z = next_zs
+            probs = probs.mean(axis=0)
+        
+        # 2. Get Scalar Target T (Same as Bellman Target)
+        # "이 행동을 했을 때 실제로 기대되는 점수"
+        T = self._compute_scalar_target(batch) # (Batch, 1)
+        bin_width = (self.config['v_max'] - self.config['v_min']) / (self.config['num_bins'] + 1)
+        idx = jnp.floor((T - self.config['v_min']) / bin_width)
 
-        # Target Value: 보수적으로 하려면 mean 대신 quantile중 하나를 쓸 수도 있음
-        # 여기서는 전체 기댓값 사용
-        next_z_mean = next_z.mean(axis=-1)
-        
-        T = batch['rewards'][..., -1] + \
-            (self.config['discount'] ** self.config["horizon_length"]) * \
-            batch['masks'][..., -1] * next_z_mean
-        
-        # (B, 1) > (B, 1) -> (B, 1) boolean
-        advantage_raw = T - z_sorted.mean(axis=-1)
-        g = jnp.where(advantage_raw > 0, 1.0, -1.0)[..., None]
-        
-        return jax.lax.stop_gradient(g)
+        v_mean = self._logit_to_scalar(logits)
+        advantage_raw = T - v_mean[..., None]
+
+        # cdf = probs.cumsum(axis=-1) # (Batch, N)
+        # cdf_extended = jnp.concatenate(
+        #     [
+        #         jnp.zeros((*cdf.shape[:-1], 1)),  # P(Z < v_min) = 0
+        #         cdf,
+        #     ],
+        #     axis=-1
+        # )  # (Batch, N + 1)
+        # idx = jnp.clip(idx, 0, self.config['num_bins']).astype(jnp.int32)
+        # g = jnp.take_along_axis(cdf_extended, idx, axis=1)
+        # g = jnp.where(advantage_raw > 0, 1.0, -1.0)
+        # g = 2.0 * g - 1.0
+            
+        return jax.lax.stop_gradient(advantage_raw)
 
     @jax.jit
     def total_critic_loss(self, batch, grad_params, rng=None):
@@ -386,7 +358,7 @@ class CFGRLAgent(flax.struct.PyTreeNode):
         
         action = noise        
         g_pos = jnp.ones((*observation.shape[:-1], 1), dtype=jnp.float32)
-
+        # g_neg = -jnp.ones((*observation.shape[:-1], 1), dtype=jnp.float32)
         uncond_mask = jnp.ones((*observation.shape[:-1], 1), dtype=jnp.float32)
         cond_mask = jnp.zeros((*observation.shape[:-1], 1), dtype=jnp.float32)
 
@@ -397,7 +369,7 @@ class CFGRLAgent(flax.struct.PyTreeNode):
                 observation, 
                 action, 
                 g_pos, 
-                t, 
+                t,
                 cond_mask,
                 is_encoded=True
             )
@@ -410,7 +382,7 @@ class CFGRLAgent(flax.struct.PyTreeNode):
                 is_encoded=True
             )
             vel = uncond_vel + self.config['cfg'] * (vel - uncond_vel)
-
+            # vel = uncond_vel
             action = action + vel / self.config['flow_steps']
         action = jnp.clip(action, -1, 1)
         return action
@@ -457,7 +429,7 @@ class CFGRLAgent(flax.struct.PyTreeNode):
             layer_norm=config['layer_norm'],
             num_ensembles=config['num_qs'],
             encoder=encoders.get('critic'),
-            num_quantiles=config['num_quantiles']
+            num_quantiles=config['num_bins']
         )
 
         actor_bc_flow_def = AdvantageConditionedActorVectorField(
@@ -505,7 +477,7 @@ class CFGRLAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='cfgrl',  # Agent name.
+            agent_name='hlcfgrl',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
@@ -528,12 +500,14 @@ def get_config():
             weight_decay=0.,
             target_mode='expectile',
             expectile_tau=0.9,
-            num_quantiles=51,
+            num_bins=51,
+            v_min=-100.0,
+            v_max=0.0,
             quantile_bound=0.05,
-            use_cfg=True,
-            use_bad_to_good_cfg=False,
+            alpha=1.0,
             cfg=1.0,
-            cfg_dropout=0.1
+            cfg_dropout=0.1,
+            sigma=0.75
         )
     )
     return config
