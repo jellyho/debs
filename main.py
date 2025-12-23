@@ -10,7 +10,6 @@ from envs.robomimic_utils import is_robomimic_env
 from utils.flax_utils import save_agent
 from utils.datasets import Dataset, ReplayBuffer
 
-
 from agents import agents
 import numpy as np
 
@@ -21,7 +20,10 @@ if 'CUDA_VISIBLE_DEVICES' in os.environ:
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('run_group', 'Debug', 'Run group.')
+flags.DEFINE_string('project', 'MFQ', 'Run group.')
 flags.DEFINE_integer('seed', 0, 'Random seed.')
+flags.DEFINE_string('task_name', 'cube-triple-play', 'Task Name')
+flags.DEFINE_integer('task_num', 0, 'Task Num')
 flags.DEFINE_string('env_name', 'cube-triple-play-singletask-task2-v0', 'Environment (dataset) name.')
 flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
 
@@ -70,9 +72,9 @@ class LoggingHelper:
 
 def main(_):
     exp_name = get_exp_name(FLAGS.seed)
-    run = setup_wandb(project='debs', group=FLAGS.run_group, name=exp_name)
+    run = setup_wandb(project=FLAGS.project, group=FLAGS.run_group, name=exp_name)
     run.tags = run.tags + (FLAGS.env_name,)
-    if FLAGS.agent.agent_name == 'hlmeanflow':
+    if 'meanflow' in FLAGS.agent.agent_name:
         run.tags = run.tags + (FLAGS.agent.mf_method,)
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
@@ -131,7 +133,7 @@ def main(_):
             ds_dict["rewards"] = penalty_rewards
             ds = Dataset.create(**ds_dict)
         
-        if FLAGS.sparse:
+        if "puzzle" in FLAGS.task_name or "scene" in FLAGS.task_name:
             # Create a new dataset with modified rewards instead of trying to modify the frozen one
             sparse_rewards = (dataset["rewards"] != 0.0) * -1.0
             ds_dict = {k: v for k, v in dataset.items()}
@@ -186,10 +188,13 @@ def main(_):
         wandb_logger=wandb,
     )
 
+    hlmean_flat = 'meanflow' in config['agent_name']
+    hlmean_late = 'meanflow' in config['agent_name'] and config['late_update']
+    hlmean_curr = 'meanflow' in config['agent_name'] and not config['late_update']
+
     # Offline RL
     for i in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):
         log_step += 1
-        # batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
         batch = train_dataset.sample(config['batch_size'])
 
         if config['agent_name'] in ['hldebs', 'debs', 'cfgrl', 'hlcfgrl']:
@@ -204,7 +209,7 @@ def main(_):
         if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
             save_agent(agent, FLAGS.save_dir, log_step)
 
-        if 'hlmeanflow' in config['agent_name']:
+        if hlmean_curr:
             if i == FLAGS.offline_steps - 1 or \
                 (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
                 # during eval, the action chunk is executed fully
@@ -233,7 +238,8 @@ def main(_):
                     wandb.log({
                         f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
                     }, step=log_step)
-    if not 'hlmeanflow' in config['agent_name']:
+
+    if not hlmean_flat or hlmean_late:
         for i in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):
             log_step += 1
             # batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
@@ -244,8 +250,8 @@ def main(_):
                 agent, info = agent.actor_update(batch)
             elif config['agent_name'] in ['resf', 'addf']:
                 agent, info = agent.residual_actor_update(batch)
-            # elif config['agent_name']  in ['hlmeanflow']:
-            #     agent, info = agent.latent_actor_update(batch)
+            elif 'meanflow' in config['agent_name']:
+                agent, info = agent.latent_actor_update(batch)
 
             if info is not None:
                 if i % FLAGS.log_interval == 0:

@@ -168,7 +168,6 @@ class HLCFGRLAgent(flax.struct.PyTreeNode):
             probs = probs.mean(axis=0)
         
         # 2. Get Scalar Target T (Same as Bellman Target)
-        # "이 행동을 했을 때 실제로 기대되는 점수"
         T = self._compute_scalar_target(batch) # (Batch, 1)
         bin_width = (self.config['v_max'] - self.config['v_min']) / (self.config['num_bins'] + 1)
         idx = jnp.floor((T - self.config['v_min']) / bin_width)

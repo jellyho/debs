@@ -312,7 +312,6 @@ class ACFQLAgent(flax.struct.PyTreeNode):
 
 
 def get_config():
-
     config = ml_collections.ConfigDict(
         dict(
             agent_name='acfql',  # Agent name.

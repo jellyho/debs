@@ -9,10 +9,9 @@ import optax
 
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
-from utils.networks import ActorMeanFlowField, QuantileValue, ActorVectorField
-from utils.hlg import _normal_cdf_log_difference
+from utils.networks import ActorMeanFlowField, Value, ActorVectorField
 
-class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
+class MEANFLOWQONESTEPAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
     """
     rng: Any
@@ -24,68 +23,91 @@ class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
         # Q(s, a) <- R + \gamma V(s')
         batch_size = batch['actions'].shape[0]
 
-        target_v = self._compute_scalar_target(batch) # B, 1
+        if self.config['rl_method'] == 'iql':
+            next_v = self.network.select(f'value')(
+                batch['next_observations']
+            )
 
-        q_logits = self.network.select('critic')(
-            batch['observations'],
-            actions=batch['actions'].reshape(batch_size, -1),
-            params=grad_params
-        ) # N, B, NAtoms
+            target_v = batch['rewards'] + \
+                (self.config['discount'] ** self.config["horizon_length"]) * \
+                batch['masks'] * next_v
 
-        target_probs = self._scalar_to_prob(target_v) # B, NAtoms
-        critic_loss = self._compute_critic_dist_loss(
-            q_logits, target_probs
-        )
-        current_q = self._logit_to_scalar(q_logits)
+            qs = self.network.select('critic')(
+                batch['observations'],
+                actions=batch['actions'].reshape(batch_size, -1),
+                params=grad_params
+            ) # N, B, 1
+
+            critic_loss = jnp.square(
+                jnp.broadcast_to(target_v, qs.shape) - qs
+            ).mean()
+
+            q = qs.mean(axis=0) # For logging
+
+        elif self.config['rl_method'] == 'ddpg':
+            rng, sample_rng = jax.random.split(rng, 2)
+            # onestep generation
+            next_actions = self.sample_actions(batch['next_observations'], rng=sample_rng)
+
+            next_qs = self.network.select('target_critic')(
+                batch['next_observations'], 
+                actions=next_actions.reshape(batch_size, -1)
+            )
+
+            if self.config['num_critic'] > 1:
+                if self.config['critic_agg'] == 'min':
+                    next_q = jnp.min(next_qs, axis=0)
+                else:
+                    next_q = jnp.mean(next_qs, axis=0)
+            else:
+                next_q = next_qs
+            
+            qs = self.network.select('critic')(
+                batch['observations'], 
+                actions=batch['actions'].reshape(batch_size, -1),
+                params=grad_params
+            )
+
+            target_q = batch['rewards'] + \
+                (self.config['discount'] ** self.config["horizon_length"]) * \
+            batch['masks'] * next_q
+
+            critic_loss = jnp.square(
+                qs - jnp.broadcast_to(target_q, qs.shape)
+            ).mean()
+
+            q = qs.mean(axis=0) # For logging
 
         return critic_loss, {
             'critic_loss': critic_loss,
-            'q_mean': current_q.mean(),
-            'q_max': current_q.max(),
-            'q_min': current_q.min(),
-            'target_q_hist': target_v,
+            'q_mean': q.mean(),
+            'q_max': q.max(),
+            'q_min': q.min(),
         }
 
     def value_loss(self, batch, grad_params, rng):
+        # Only applied when IQL
         batch_size = batch['actions'].shape[0]
 
-        q_logits = self.network.select('target_critic')(
+        qs = self.network.select('target_critic')(
             batch['observations'],
             actions=batch['actions'].reshape(batch_size, -1),
-        ) # N, B, NAtoms
-
-        q_probs = jax.nn.softmax(q_logits, axis=-1)
-        qs = self._logit_to_scalar(q_logits) # N, B
+        ) # N, B
 
         if self.config['num_critic'] > 1:
             if self.config['critic_agg'] == 'min':
-                min_q_idx = jnp.argmin(qs, axis=0)
-                batch_indices = jnp.arange(qs.shape[1])
-                q = qs[min_q_idx, batch_indices]
-                q_prob = q_probs[min_q_idx, batch_indices]
+                q = jnp.min(qs, axis=0)
             else:
                 q = jnp.mean(qs, axis=0)
-                q_prob = jnp.mean(q_probs, axis=0)
         else:
             q = qs
-            q_prob = q_probs
 
-        q = q[..., None]
-
-        v_logit = self.network.select('value')(
+        v = self.network.select('value')(
             batch['observations'],
             params=grad_params
-        ) # B, NAtoms
-
-        v = self._logit_to_scalar(v_logit)
-        v = v[..., None]
-
-        if self.config['target_mode'] == 'expectile':
-            g_hard = jnp.where(q >= v, self.config['expectile_tau'], 1.0 - self.config['expectile_tau'])
-        else:
-            g_hard = jnp.ones_like(v)
-        ce_loss = -jnp.sum(q_prob * jax.nn.log_softmax(v_logit, axis=-1), axis=-1)
-        value_loss = (g_hard * ce_loss[..., None]).mean()
+        ) # B
+        g = jnp.where(q >= v, self.config['expectile_tau'], 1.0 - self.config['expectile_tau'])
+        value_loss = (g * jnp.square(q - v)).mean()
 
         metrics = {
             # losses
@@ -97,64 +119,6 @@ class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
             'q_target_hist': q,
         }
         return value_loss, metrics
-
-    def _prob_to_scalar(self, dist_probs):
-        """Convert distributional probabilities to scalar value."""
-        support = jnp.linspace(
-            self.config['v_min'], self.config['v_max'], self.config['num_bins'] + 1
-        )
-        centers = (support[:-1] + support[1:]) / 2
-        scalar_value = jnp.sum(dist_probs * centers, axis=-1)
-        return scalar_value
-
-    def _logit_to_scalar(self, dist_logits):
-        """Convert distributional probabilities to scalar value."""
-        dist_probs = jax.nn.softmax(dist_logits, axis=-1)
-        scalar_value = self._prob_to_scalar(dist_probs)
-        return scalar_value
-
-    def _scalar_to_prob(self, target_scalar):
-        sigma = self.config['sigma'] * (self.config['v_max'] - self.config['v_min']) / (self.config['num_bins'] + 1)
-
-        support = jnp.linspace(
-            self.config['v_min'], self.config['v_max'], self.config['num_bins'] + 1
-        )
-
-        bin_log_probs = _normal_cdf_log_difference(
-            (support[1:] - target_scalar) / (jnp.sqrt(2) * sigma),
-            (support[:-1] - target_scalar) / (jnp.sqrt(2) * sigma),
-        )
-        log_z = _normal_cdf_log_difference(
-            (support[-1] - target_scalar) / (jnp.sqrt(2) * sigma),
-            (support[0] - target_scalar) / (jnp.sqrt(2) * sigma),
-        )
-
-        return jax.lax.stop_gradient(jnp.exp(bin_log_probs - log_z))
-
-    def _compute_scalar_target(self, batch):
-        """Calculates the scalar Bellman target: r + gamma * E[V(s')]"""
-        
-        # 1. Get Next State Distribution (Logits)
-        next_logits = self.network.select(f'value')(
-            batch['next_observations']
-        )
-
-        next_v = self._logit_to_scalar(next_logits)
-        
-        # 3. Bellman Update (Scalar)
-        T = batch['rewards'] + \
-            (self.config['discount'] ** self.config["horizon_length"]) * \
-            batch['masks'] * next_v
-            
-        T = T[..., None]
-            
-        return jax.lax.stop_gradient(T)
-
-    def _compute_critic_dist_loss(self, q_logits, target_v_probs):
-        q_log_probs = jax.nn.log_softmax(q_logits, axis=-1) # N, B, NAtoms
-        ce_loss = -jnp.sum(jnp.broadcast_to(target_v_probs, q_log_probs.shape) * q_log_probs, axis=-1) # N, B
-        dist_loss = ce_loss.mean()
-        return dist_loss
 
     ## MF utils
     def adaptive_l2_loss(self, batch_size, error, p=0.5, c=1e-3):
@@ -213,19 +177,7 @@ class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
         t, r = self.sample_t_r(batch_size, t_rng)
 
         ##### It does not need to be normal distirbution
-        if self.config['latent_dist'] == 'normal':
-            e = jax.random.normal(x_rng, (batch_size, action_dim))
-        elif self.config['latent_dist'] == 'uniform':
-            e = jax.random.uniform(x_rng, (batch_size, action_dim), minval=-1.0, maxval=1.0)
-        elif self.config['latent_dist'] == 'simplex':
-            e = -jnp.log(jax.random.uniform(x_rng, (batch_size, action_dim))) # Exponential
-            e = e / jnp.sum(e, axis=-1, keepdims=True) # Sum = 1
-        elif self.config['latent_dist'] == 'sphere':
-            e = jax.random.normal(x_rng, (batch_size, action_dim))
-            sq_sum = jnp.sum(jnp.square(e), axis=-1, keepdims=True)
-            norm = jnp.sqrt(sq_sum + 1e-6)
-            e = e / norm * jnp.sqrt(action_dim)
-        
+        e = self.sample_latent_dist(x_rng, batch_size, action_dim)
         z = (1 - t) * x + t * e
         v = e - x
 
@@ -266,103 +218,79 @@ class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
             'mf/dudt_mean': dudt.mean(),
         }
 
-    def latent_actor_loss(self, batch, grad_params, rng):
+    def sample_latent_dist(self, x_rng, batch_size, action_dim):
+        if self.config['latent_dist'] == 'normal':
+            e = jax.random.normal(x_rng, (batch_size, action_dim))
+        elif self.config['latent_dist'] == 'uniform':
+            e = jax.random.uniform(x_rng, (batch_size, action_dim), minval=-1.0, maxval=1.0)
+        elif self.config['latent_dist'] == 'simplex':
+            e = -jnp.log(jax.random.uniform(x_rng, (batch_size, action_dim))) # Exponential
+            e = e / jnp.sum(e, axis=-1, keepdims=True) # Sum = 1
+        elif self.config['latent_dist'] == 'sphere':
+            e = jax.random.normal(x_rng, (batch_size, action_dim))
+            sq_sum = jnp.sum(jnp.square(e), axis=-1, keepdims=True)
+            norm = jnp.sqrt(sq_sum + 1e-6)
+            e = e / norm * jnp.sqrt(action_dim)
+        return e
+
+
+    def onestep_actor_loss(self, batch, grad_params, rng):
         observations = batch['observations']
         actions_gt = batch['actions'] # Dataset Actions (Ground Truth)
         batch_size = observations.shape[0]
         latent_dim = self.config['action_dim'] * self.config['horizon_length']
         actions_gt_flat = jnp.reshape(actions_gt, (batch_size, latent_dim))      
-
+        
         ### Query latent actor
-        z_pred = self.network.select('latent_actor')(
+        rng, x_rng, l_rng = jax.random.split(rng, 3)
+        normal = jax.random.normal(x_rng, (batch_size, latent_dim))
+
+        onestep_pred = self.network.select('onestep_actor')(
             observations, 
+            normal,
+            rng=l_rng,
             params=grad_params # <--- Gradients flow here
         )
 
-        t1 = jnp.ones((batch_size, 1))  # Noise time
-        x_pred = self.network.select('actor_bc_flow')(
-            observations, 
-            z_pred,     # Input is Predicted Z
-            t1,         # Start at t=1
-            t1,         # dt = 1
+        rng, x_rng = jax.random.split(rng, 2)
+        x_pred = self.compute_flow_actions(observations, normal)
+        a_pred_flat = jnp.reshape(x_pred, (batch_size, latent_dim))
+
+        info_dict = {}
+
+        qs = self.network.select('critic')(
+            observations,
+            onestep_pred.reshape(batch_size, -1)
         )
 
-        if self.config['mf_method'] == 'mf':
-            a_pred_flat = z_pred - jnp.reshape(x_pred, (batch_size, latent_dim))
-        elif self.config['mf_method'] == 'jit_mf':
-            a_pred_flat = jnp.reshape(x_pred, (batch_size, latent_dim))
+        if self.config['num_critic'] > 1:
+            q = jnp.mean(qs, axis=0)
+        else:
+            q = qs
 
-        info_dict = {
-            'z_norm': jnp.mean(jnp.square(z_pred)),
-        }
+        q_loss = -q.mean()
+        lam = jax.lax.stop_gradient(1 / jnp.abs(q).mean())
+        q_loss = lam * q_loss
 
-        if self.config['extract_method'] == 'ddpg':
-             # Q(s, a)
-            q_logits = self.network.select('critic')(
-                observations,
-                a_pred_flat.reshape(batch_size, -1)
-            )
-            qs = self._logit_to_scalar(q_logits)
-
-            if self.config['num_critic'] > 1:
-                q = jnp.mean(qs, axis=0)
-            else:
-                q = qs
-
-            loss = -q.mean()
-            lam = jax.lax.stop_gradient(1 / jnp.abs(q).mean())
-            loss = lam * loss
-
-        elif self.config['extract_method'] == 'awr':
-             # Q(s, a)
-            q_logits = self.network.select('critic')(
-                observations,
-                actions_gt_flat
-            )
-            qs = self._logit_to_scalar(q_logits)
-
-            if self.config['num_critic'] > 1:
-                q = jnp.mean(qs, axis=0)
-            else:
-                q = qs
-
-            v_logits = self.network.select('value')(observations)
-            v = self._logit_to_scalar(v_logits) # (B,)
-        
-            adv = q.reshape(-1) - v # (B,) 
-            tau = self.config.get('tau', 1.0)
-            weight = jnp.exp(adv / tau)
-            weight = jnp.clip(weight, 0.0, 100.0)
-            weight = jax.lax.stop_gradient(weight) # (B,)
-
-            # Flow의 Jacobian을 타고 z_pred로 Gradient가 전달됨
-            sq_err = jnp.mean(
-                jnp.reshape(
-                    jnp.square(a_pred_flat - actions_gt_flat),
-                    (batch_size, self.config["horizon_length"], self.config["action_dim"])
-                )
-                , axis=(1, 2)
-            )
-            loss = jnp.mean(weight * sq_err)
-
-            info_dict['adv_mean'] = adv.mean()
-            info_dict['adv_hist'] = adv
-            info_dict['weight_mean'] = weight.mean()
-
-        info_dict['latent_loss'] = loss
+        mse_loss = jnp.mean(jnp.square(a_pred_flat - onestep_pred))
+        loss = q_loss + mse_loss * self.config['alpha']
+            
+        info_dict['onestep_loss'] = loss
+        info_dict['mse_loss'] = mse_loss
+        info_dict['q_loss'] = q_loss
 
         return loss, info_dict
 
     @jax.jit
-    def total_latent_actor_loss(self, batch, grad_params, rng=None):
+    def total_onestep_actor_loss(self, batch, grad_params, rng=None):
         info = {}
         rng = rng if rng is not None else self.rng
 
         rng, actor_rng = jax.random.split(rng, 2)
 
-        actor_loss, actor_info = self.latent_actor_loss(batch, grad_params, actor_rng)
+        actor_loss, actor_info = self.onestep_actor_loss(batch, grad_params, actor_rng)
         for k, v in actor_info.items():
-            info[f'latent/{k}'] = v
+            info[f'onestpe/{k}'] = v
 
         return actor_loss, info
 
@@ -374,29 +302,29 @@ class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
 
         rng, actor_rng, critic_rng, value_rng = jax.random.split(rng, 4)
 
+        loss = 0
+
         critic_loss, critic_info = self.critic_loss(batch, grad_params, critic_rng)
+        loss += critic_loss
         for k, v in critic_info.items():
             info[f'critic/{k}'] = v
 
-        value_loss, value_info = self.value_loss(batch, grad_params, value_rng)
-
-        for k, v in value_info.items():
-            info[f'value/{k}'] = v
+        if self.config['rl_method'] == 'iql':
+            value_loss, value_info = self.value_loss(batch, grad_params, value_rng)
+            for k, v in value_info.items():
+                info[f'value/{k}'] = v
+            loss += value_loss
 
         actor_loss, actor_info = self.actor_loss(batch, grad_params, actor_rng)
-
+        loss += actor_loss
         for k, v in actor_info.items():
             info[f'actor/{k}'] = v
 
-        if not self.config['late_update']:
-            latent_loss, latent_info = self.latent_actor_loss(batch, grad_params, actor_rng)
+        onestep_loss, onestep_info = self.onestep_actor_loss(batch, grad_params, actor_rng)
+        loss += onestep_loss
+        for k, v in onestep_info.items():
+            info[f'onestep/{k}'] = v
 
-            for k, v in latent_info.items():
-                info[f'latent/{k}'] = v
-        else:
-            latent_loss = 0
-
-        loss = critic_loss + actor_loss + latent_loss + value_loss
         return loss, info
 
     def target_update(self, network, module_name):
@@ -421,18 +349,18 @@ class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
         return agent.replace(network=new_network, rng=new_rng), info
 
     @staticmethod
-    def _latent_actor_update(agent, batch):
+    def _onestep_actor_update(agent, batch):
         """Update the agent and return a new agent with information dictionary."""
         new_rng, rng = jax.random.split(agent.rng)
 
         def loss_fn(grad_params):
-            return agent.total_latent_actor_loss(batch, grad_params, rng=rng)
+            return agent.total_onestep_actor_loss(batch, grad_params, rng=rng)
         new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
         return agent.replace(network=new_network, rng=new_rng), info
 
     @jax.jit
-    def latent_actor_update(self, batch):
-        return self._latent_actor_update(self, batch)
+    def onestep_actor_update(self, batch):
+        return self._onestep_actor_update(self, batch)
 
     @jax.jit
     def update(self, batch):
@@ -451,7 +379,10 @@ class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
         observations,
         rng=None,
     ):
-        return self.network.select('value')(observations)
+        if self.config['rl_method'] == 'iql':
+            return self.network.select('value')(observations)
+        else:
+            return jnp.zeros_like(observations)
     
     @jax.jit
     def sample_actions(
@@ -463,14 +394,22 @@ class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
         Sample actions. 
         Note: CFG logic and step size are handled inside 'compute_flow_actions' using self.config.
         """
-        noises = self.network.select('latent_actor')(
-            observations
-        )
-        # 3. Compute Actions (Delegated to core logic)
-        # Observations are passed raw; compute_flow_actions handles encoding.
-        actions = self.compute_flow_actions(observations, noises)
+        latent_dim = self.config["horizon_length"] * self.config["action_dim"]
 
-        # 4. Reshape if Chunking
+        # if self.config['noisy_latent_actor']:
+        rng, x_rng = jax.random.split(rng, 2)
+        noises = jax.random.normal(x_rng, 
+            (*observations.shape[: -len(self.config['ob_dims'])], latent_dim)
+        )
+        actions = self.network.select('onestep_actor')(
+            observations, 
+            noises,
+        )
+        # else:
+        #     noises = self.network.select('latent_actor')(
+        #         observations, 
+        #     )
+        # actions = self.compute_flow_actions(observations, noises)
         actions = jnp.reshape(
             actions, 
             (*observations.shape[: -len(self.config['ob_dims'])],  # batch_size
@@ -540,22 +479,22 @@ class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
         if config['encoder'] is not None:
             encoder_module = encoder_modules[config['encoder']]
             encoders['critic'] = encoder_module()
+            encoders['value'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()
 
         # Define networks.
-        value_def = QuantileValue(
-            hidden_dims=config['value_hidden_dims'],
-            layer_norm=config['layer_norm'],
-            encoder=encoders.get('critic'),
-            num_quantiles=config['num_bins']
-        )
+        if config['rl_method'] == 'iql':
+            value_def = Value(
+                hidden_dims=config['value_hidden_dims'],
+                layer_norm=config['layer_norm'],
+                encoder=encoders.get('value')
+            )
 
-        critic_def = QuantileValue(
+        critic_def = Value(
             hidden_dims=config['critic_hidden_dims'],
             layer_norm=config['layer_norm'],
             num_ensembles=config['num_critic'],
             encoder=encoders.get('critic'),
-            num_quantiles=config['num_bins']
         )
 
         actor_bc_flow_def = ActorMeanFlowField(
@@ -565,29 +504,25 @@ class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
             encoder=encoders.get('actor_bc_flow'),
         )
 
-        latent_actor_def = ActorVectorField(
-            hidden_dims=config['latent_actor_hidden_dims'],
+        onestep_actor_def = ActorVectorField(
+            hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
             encoder=encoders.get('actor_bc_flow'),
-            latent_dist=config['latent_dist']
+            latent_dist='onestep'
         )
-
-        if config['noisy_latent_actor']:
-            latent_actor_input_shape = (ex_observations, full_actions)
-        else:
-            latent_actor_input_shape = (ex_observations)
 
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times, ex_times)),
-            latent_actor=(latent_actor_def, latent_actor_input_shape),
-            value=(value_def, (ex_observations)),
+            onestep_actor=(onestep_actor_def, (ex_observations, full_actions)),
             critic=(critic_def, (ex_observations, full_actions)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations, full_actions)),
         )
 
+        if config['rl_method'] == 'iql':
+            network_info['value'] = value_def, (ex_observations)
+
         if encoders.get('actor_bc_flow') is not None:
-            # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
             network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
 
         networks = {k: v[0] for k, v in network_info.items()}
@@ -615,7 +550,7 @@ class HLMEANFLOWQAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='hlmeanflowq',  # Agent name.
+            agent_name='meanflowqonestep',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
@@ -623,7 +558,6 @@ def get_config():
             actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
             value_hidden_dims=(256, 256, 256, 256),  # Value network hidden dimensions.
             critic_hidden_dims=(128, 128, 128, 128),  # Value network hidden dimensions.
-            latent_actor_hidden_dims=(512, 512),
             layer_norm=True,  # Whether to use layer normalization.
             actor_layer_norm=False,  # Whether to use layer normalization for the actor.
             discount=0.99,  # Discount factor.
@@ -635,16 +569,13 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
-            target_mode='expectile',
+            rl_method='iql', # DDPG, IQL
             expectile_tau=0.9,
-            num_bins=101,
-            v_min=-100.0,
-            v_max=0.0,
-            sigma=0.75,
             flow_ratio=0.25,
             mf_method='jit_mf',
             late_update=False,
             latent_dist='uniform',
+            alpha=1.0,
             extract_method='awr', # 'ddpg', 'awr',,
             noisy_latent_actor=False
         )

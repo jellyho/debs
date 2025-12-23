@@ -10,7 +10,8 @@ from agents.hlcfgrl import HLCFGRLAgent
 from agents.hldsrl import HLDSRLAgent
 from agents.hlmeanflow import HLMEANFLOWAgent
 from agents.hlmeanflowq import HLMEANFLOWQAgent
-from agents.hlmeanflowqg import HLMEANFLOWQGAgent
+from agents.meanflowq import MEANFLOWQAgent
+from agents.meanflowqonestep import MEANFLOWQONESTEPAgent
 
 agents = dict(
     acfql=ACFQLAgent,
@@ -25,5 +26,6 @@ agents = dict(
     hlpriordsrl=HLDSRLAgent,
     hlmeanflow=HLMEANFLOWAgent,
     hlmeanflowq=HLMEANFLOWQAgent,
-    hlmeanflowqg=HLMEANFLOWQGAgent,
+    meanflowq=MEANFLOWQAgent,
+    meanflowqonestep=MEANFLOWQONESTEPAgent,
 )

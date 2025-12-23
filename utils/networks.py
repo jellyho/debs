@@ -183,7 +183,7 @@ class Value(nn.Module):
 
     hidden_dims: Sequence[int]
     layer_norm: bool = True
-    num_ensembles: int = 2
+    num_ensembles: int = 1
     encoder: nn.Module = None
 
     def setup(self):
@@ -324,6 +324,7 @@ class ActorVectorField(nn.Module):
     encoder: nn.Module = None
     use_fourier_features: bool = False
     fourier_feature_dim: int = 64
+    latent_dist: str = 'normal'
 
     def setup(self) -> None:
         self.mlp = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
@@ -331,7 +332,7 @@ class ActorVectorField(nn.Module):
             self.ff = FourierFeatures(self.fourier_feature_dim)
 
     @nn.compact
-    def __call__(self, observations, actions=None, times=None, v_base=None, is_encoded=False):
+    def __call__(self, observations, actions=None, times=None, v_base=None, is_encoded=False, rng=None):
         """Return the vectors at the given states, actions, and times (optional).
 
         Args:
@@ -360,6 +361,98 @@ class ActorVectorField(nn.Module):
 
         v = self.mlp(inputs)
 
+        if self.latent_dist == 'normal':
+            means = nn.Dense(self.action_dim)(v)
+            log_stds = nn.Dense(self.action_dim)(v)
+            log_stds = jnp.clip(log_stds, -20, 2)
+            stds = jnp.exp(log_stds)
+            dist = distrax.MultivariateNormalDiag(loc=means, scale_diag=stds)
+            if rng is not None:
+                return nn.tanh(dist.sample(seed=rng)) * 2
+            else:
+                return nn.tanh(dist.mode()) * 2
+        elif self.latent_dist == 'uniform':
+            return nn.tanh(v)
+        elif self.latent_dist == 'simplex':
+            return nn.softmax(v)
+        elif self.latent_dist == 'sphere':
+            sq_sum = jnp.sum(jnp.square(v), axis=-1, keepdims=True)
+            norm = jnp.sqrt(sq_sum + 1e-6) 
+            return v / norm * jnp.sqrt(self.action_dim)
+        print('Hi, Im one step actor')
+        return v
+
+class LatentActor(nn.Module):
+    """Actor vector field network for flow matching.
+
+    Attributes:
+        hidden_dims: Hidden layer dimensions.
+        action_dim: Action dimension.
+        layer_norm: Whether to apply layer normalization.
+        encoder: Optional encoder module to encode the inputs.
+    """
+
+    hidden_dims: Sequence[int]
+    action_dim: int
+    layer_norm: bool = False
+    encoder: nn.Module = None
+    latent_dist: str = 'normal'
+
+    def setup(self) -> None:
+        self.mlp = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
+
+    @nn.compact
+    def __call__(self, observations, actions=None, v_base=None, is_encoded=False, rng=None, evaluation=None):
+        """Return the vectors at the given states, actions, and times (optional).
+
+        Args:
+            observations: Observations.
+            actions: Actions.
+            times: Times (optional).
+            is_encoded: Whether the observations are already encoded.
+        """
+        inputs = []
+        if not is_encoded and self.encoder is not None:
+            observations = self.encoder(observations)
+        inputs.append(observations)
+
+        if actions is not None:
+            inputs.append(actions)
+
+        if v_base is not None:
+            inputs.append(v_base)
+
+        inputs = jnp.concatenate(inputs, axis=-1)
+
+        v = self.mlp(inputs)
+
+        if self.latent_dist == 'normal':
+            means = nn.Dense(self.action_dim)(v)
+            log_stds = nn.Dense(self.action_dim)(v)
+            log_stds = jnp.clip(log_stds, -20, 2)
+            stds = jnp.exp(log_stds)
+            base_dist = distrax.MultivariateNormalDiag(loc=means, scale_diag=stds)
+            bijector = distrax.Chain([
+                # (2) [-1, 1] 범위를 [low, high] 범위로 선형 변환 (Shift & Scale)
+                distrax.ScalarAffine(shift=0, scale=2),
+                # (1) (-inf, inf) 범위를 (-1, 1)로 누름 (Tanh)
+                distrax.Tanh()
+            ])
+            dist = distrax.Transformed(distribution=base_dist, bijector=bijector)
+            if evaluation:
+                return dist.mode()
+            else:
+                return dist.sample(rng)
+
+            return v
+        elif self.latent_dist == 'uniform':
+            return nn.tanh(v)
+        elif self.latent_dist == 'simplex':
+            return nn.softmax(v)
+        elif self.latent_dist == 'sphere':
+            sq_sum = jnp.sum(jnp.square(v), axis=-1, keepdims=True)
+            norm = jnp.sqrt(sq_sum + 1e-6) 
+            return v / norm * jnp.sqrt(self.action_dim)
         return v
 
 class AdvantageConditionedActorVectorField(nn.Module):
