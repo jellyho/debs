@@ -88,3 +88,4 @@ h5py
 robomimic
 wandb[media]
 opencv-python
+seaborn

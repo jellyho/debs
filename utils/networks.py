@@ -362,15 +362,9 @@ class ActorVectorField(nn.Module):
         v = self.mlp(inputs)
 
         if self.latent_dist == 'normal':
-            means = nn.Dense(self.action_dim)(v)
-            log_stds = nn.Dense(self.action_dim)(v)
-            log_stds = jnp.clip(log_stds, -20, 2)
-            stds = jnp.exp(log_stds)
-            dist = distrax.MultivariateNormalDiag(loc=means, scale_diag=stds)
-            if rng is not None:
-                return nn.tanh(dist.sample(seed=rng)) * 2
-            else:
-                return nn.tanh(dist.mode()) * 2
+            return v
+        elif self.latent_dist == 'truncated_normal':
+            return nn.tanh(v) * 2
         elif self.latent_dist == 'uniform':
             return nn.tanh(v)
         elif self.latent_dist == 'simplex':
@@ -379,6 +373,10 @@ class ActorVectorField(nn.Module):
             sq_sum = jnp.sum(jnp.square(v), axis=-1, keepdims=True)
             norm = jnp.sqrt(sq_sum + 1e-6) 
             return v / norm * jnp.sqrt(self.action_dim)
+        elif self.latent_dist == 'beta':
+            # Beta(2,2) Scaled Target이 [-1, 1]이므로 
+            # Tanh를 통해 [-1, 1]로 범위를 맞춤
+            return 2 * nn.tanh(v)
         print('Hi, Im one step actor')
         return v
 

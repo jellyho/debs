@@ -11,55 +11,18 @@ from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, Value
 
-class ACFQLAgent(flax.struct.PyTreeNode):
+class FLOWAgent(flax.struct.PyTreeNode):
     """Flow Q-learning (FQL) agent with action chunking. 
     """
-
     rng: Any
     network: Any
     config: Any = nonpytree_field()
 
-    def critic_loss(self, batch, grad_params, rng):
-        """Compute the FQL critic loss."""
-        batch_size = batch['actions'].shape[0]
-
-        # if self.config["action_chunking"]:
-        batch_actions = jnp.reshape(batch["actions"], (batch_size, -1))
-        
-        # TD loss
-        rng, sample_rng = jax.random.split(rng)
-        next_actions = self.sample_actions(batch['next_observations'], rng=sample_rng)
-
-        next_qs = self.network.select(f'target_critic')(
-            batch['next_observations'], 
-            actions=next_actions.reshape(batch_size, -1)
-        )
-        if self.config['critic_agg'] == 'min':
-            next_q = next_qs.min(axis=0)
-        else:
-            next_q = next_qs.mean(axis=0)
-        
-        target_q = batch['rewards'][..., -1] + \
-            (self.config['discount'] ** self.config["horizon_length"]) * batch['masks'] * next_q
-
-        q = self.network.select('critic')(
-            batch['observations'], 
-            actions=batch_actions, 
-            params=grad_params
-        )
-        
-        critic_loss = (jnp.square(q - target_q)).mean()
-
-        return critic_loss, {
-            'critic_loss': critic_loss,
-            'q_mean': q.mean(),
-            'q_max': q.max(),
-            'q_min': q.min(),
-        }
-
     def sample_latent_dist(self, x_rng, sample_shape):
         if self.config['latent_dist'] == 'normal':
             e = jax.random.normal(x_rng, sample_shape)
+        elif self.config['latent_dist'] == 'truncated_normal':
+            e = jax.random.truncated_normal(x_rng, sample_shape)
         elif self.config['latent_dist'] == 'uniform':
             e = jax.random.uniform(x_rng, sample_shape, minval=-1.0, maxval=1.0)
         elif self.config['latent_dist'] == 'simplex':
@@ -69,7 +32,10 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             e = jax.random.normal(x_rng, sample_shape)
             sq_sum = jnp.sum(jnp.square(e), axis=-1, keepdims=True)
             norm = jnp.sqrt(sq_sum + 1e-6)
-            e = e / norm * jnp.sqrt(action_dim)
+            e = e / norm * jnp.sqrt(sample_shape[-1])
+        elif self.config['latent_dist'] == 'beta':
+            e = jax.random.beta(x_rng, 2.0, 2.0, sample_shape)
+            e = e * 2.0 - 1.0
         return e
 
     def actor_loss(self, batch, grad_params, rng):
@@ -92,42 +58,15 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             params=grad_params
         )
 
+        # only bc on the valid chunk indices
         bc_flow_loss = jnp.mean(jnp.square(pred - vel))
 
-        # Distillation loss.
-        rng, noise_rng = jax.random.split(rng)
-        noises = self.sample_latent_dist(noise_rng, (batch_size, action_dim))
-        target_flow_actions = self.compute_flow_actions(
-            batch['observations'], 
-            noises=noises
-        )
-        actor_actions = self.network.select('actor_onestep_flow')(
-            batch['observations'], 
-            noises, 
-            params=grad_params
-        )
-
-        distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
-        # Q loss.
-        actor_actions = jnp.clip(actor_actions, -1, 1)
-        qs = self.network.select(f'critic')(
-            batch['observations'], 
-            actions=actor_actions
-        )
-        q = jnp.mean(qs, axis=0)
-        q_loss = -q.mean()
-        lam = jax.lax.stop_gradient(1 / jnp.abs(q).mean())
-        q_loss = lam * q_loss
-
         # Total loss.
-        actor_loss = bc_flow_loss + distill_loss * self.config['alpha'] + q_loss
-
+        actor_loss = bc_flow_loss
         return actor_loss, {
             'actor_loss': actor_loss,
-            'bc_flow_loss': bc_flow_loss,
-            'distill_loss': distill_loss,
         }
-    
+
     @jax.jit
     def sample_values(
         self,
@@ -142,27 +81,14 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         info = {}
         rng = rng if rng is not None else self.rng
 
-        rng, actor_rng, critic_rng = jax.random.split(rng, 3)
-
-        critic_loss, critic_info = self.critic_loss(batch, grad_params, critic_rng)
-        for k, v in critic_info.items():
-            info[f'critic/{k}'] = v
+        rng, actor_rng = jax.random.split(rng, 2)
 
         actor_loss, actor_info = self.actor_loss(batch, grad_params, actor_rng)
         for k, v in actor_info.items():
             info[f'actor/{k}'] = v
 
-        loss = critic_loss + actor_loss
+        loss = actor_loss
         return loss, info
-
-    def target_update(self, network, module_name):
-        """Update the target network."""
-        new_target_params = jax.tree_util.tree_map(
-            lambda p, tp: p * self.config['tau'] + tp * (1 - self.config['tau']),
-            self.network.params[f'modules_{module_name}'],
-            self.network.params[f'modules_target_{module_name}'],
-        )
-        network.params[f'modules_target_{module_name}'] = new_target_params
 
     @staticmethod
     def _update(agent, batch):
@@ -173,7 +99,6 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             return agent.total_loss(batch, grad_params, rng=rng)
 
         new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
-        agent.target_update(new_network, 'critic')
         return agent.replace(network=new_network, rng=new_rng), info
 
     @jax.jit
@@ -193,15 +118,10 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         observations,
         rng=None,
     ):
-        latent_dim = self.config["horizon_length"] * self.config["action_dim"]
         rng, x_rng = jax.random.split(rng, 2)
-
+        latent_dim = self.config["horizon_length"] * self.config["action_dim"]
         e = self.sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim))
-        actions = self.network.select(f'actor_onestep_flow')(
-            observations, 
-            e
-        )
-        actions = jnp.clip(actions, -1, 1)
+        actions = self.compute_flow_actions(observations, e)
         actions = jnp.reshape(
             actions, 
             (*observations.shape[: -len(self.config['ob_dims'])],  # batch_size
@@ -218,6 +138,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         """Compute actions from the BC flow model using the Euler method."""
         if self.config['encoder'] is not None:
             observations = self.network.select('actor_bc_flow_encoder')(observations)
+
         actions = noises
         # Euler method.
         for i in range(self.config['flow_steps']):
@@ -254,24 +175,16 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             ex_actions,
             (ex_actions.shape[0], -1)
         )
+
         full_action_dim = full_actions.shape[-1]
 
         # Define encoders.
         encoders = dict()
         if config['encoder'] is not None:
             encoder_module = encoder_modules[config['encoder']]
-            encoders['critic'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()
-            encoders['actor_onestep_flow'] = encoder_module()
 
         # Define networks.
-        critic_def = Value(
-            hidden_dims=config['value_hidden_dims'],
-            layer_norm=config['layer_norm'],
-            num_ensembles=config['num_critic'],
-            encoder=encoders.get('critic'),
-        )
-
         actor_bc_flow_def = ActorVectorField(
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
@@ -280,19 +193,11 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             use_fourier_features=config["use_fourier_features"],
             fourier_feature_dim=config["fourier_feature_dim"],
         )
-        actor_onestep_flow_def = ActorVectorField(
-            hidden_dims=config['actor_hidden_dims'],
-            action_dim=full_action_dim,
-            layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_onestep_flow'),
-        )
 
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
-            actor_onestep_flow=(actor_onestep_flow_def, (ex_observations, full_actions)),
-            critic=(critic_def, (ex_observations, full_actions)),
-            target_critic=(copy.deepcopy(critic_def), (ex_observations, full_actions)),
         )
+        
         if encoders.get('actor_bc_flow') is not None:
             # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
             network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
@@ -311,7 +216,6 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         network = TrainState.create(network_def, network_params, tx=network_tx)
 
         params = network.params
-        params[f'modules_target_critic'] = params[f'modules_critic']
 
         config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim
@@ -322,13 +226,13 @@ class ACFQLAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='acfql',  # Agent name.
+            agent_name='flow',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
             batch_size=256,  # Batch size.
             actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
-            value_hidden_dims=(256, 256, 256, 256),  # Value network hidden dimensions.
+            value_hidden_dims=(512, 512, 512, 512),  # Value network hidden dimensions.
             layer_norm=True,  # Whether to use layer normalization.
             actor_layer_norm=False,  # Whether to use layer normalization for the actor.
             discount=0.99,  # Discount factor.
@@ -337,12 +241,8 @@ def get_config():
             alpha=1.0,  # BC coefficient (need to be tuned for each environment).
             num_critic=2, # critic ensemble size
             flow_steps=10,  # Number of flow steps.
-            normalize_q_loss=False,  # Whether to normalize the Q loss.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
             horizon_length=ml_collections.config_dict.placeholder(int), # will be set
-            action_chunking=True,  # False means n-step return
-            actor_type="distill-ddpg",
-            actor_num_samples=32,  # for actor_type="best-of-n" only
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
@@ -353,7 +253,6 @@ def get_config():
             late_update=False,
             latent_dist='uniform',
             extract_method='awr', # 'ddpg', 'awr',,
-            noisy_latent_actor=False
         )
     )
     return config

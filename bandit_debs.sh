@@ -19,4 +19,4 @@ python main.py \
     --agent.num_critic=2 \
     --agent.latent_dist='normal' \
     --agent.late_update=False \
-    --agent.alpha 1.0 \
+    --agent.alpha 0.1 \

@@ -221,6 +221,8 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
     def sample_latent_dist(self, x_rng, sample_shape):
         if self.config['latent_dist'] == 'normal':
             e = jax.random.normal(x_rng, sample_shape)
+        elif self.config['latent_dist'] == 'truncated_normal':
+            e = jax.random.truncated_normal(x_rng, sample_shape)
         elif self.config['latent_dist'] == 'uniform':
             e = jax.random.uniform(x_rng, sample_shape, minval=-1.0, maxval=1.0)
         elif self.config['latent_dist'] == 'simplex':
@@ -231,6 +233,9 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             sq_sum = jnp.sum(jnp.square(e), axis=-1, keepdims=True)
             norm = jnp.sqrt(sq_sum + 1e-6)
             e = e / norm * jnp.sqrt(sample_shape[-1])
+        elif self.config['latent_dist'] == 'beta':
+            e = jax.random.beta(x_rng, 2.0, 2.0, sample_shape)
+            e = e * 2.0 - 1.0
         return e
 
 
@@ -292,7 +297,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
 
             loss = -q.mean()
             lam = jax.lax.stop_gradient(1 / jnp.abs(q).mean())
-            loss = lam * loss
+            loss = self.config['alpha'] * lam * loss
 
         elif self.config['extract_method'] == 'awr': # works only IQL
             assert self.config['rl_method'] == 'iql'
