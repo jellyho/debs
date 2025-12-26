@@ -69,7 +69,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             e = jax.random.normal(x_rng, sample_shape)
             sq_sum = jnp.sum(jnp.square(e), axis=-1, keepdims=True)
             norm = jnp.sqrt(sq_sum + 1e-6)
-            e = e / norm * jnp.sqrt(action_dim)
+            e = e / norm * jnp.sqrt(sample_shape[-1])
         return e
 
     def actor_loss(self, batch, grad_params, rng):
