@@ -171,8 +171,8 @@ def main(_):
     train_dataset = process_train_dataset(train_dataset)
     example_batch = train_dataset.sample(config['batch_size'])
 
-    config['v_min'] = train_dataset.v_min
-    config['v_max'] = train_dataset.v_max
+    # config['v_min'] = train_dataset.v_min
+    # config['v_max'] = train_dataset.v_max
 
     for k, v in example_batch.items():
         try:

@@ -41,9 +41,13 @@ def get_filtered_data(entity, project, config, x_key='_step', y_key='eval/succes
             if target_values is not None and group_val not in target_values:
                 continue
 
-        hist = run.history(keys=[x_key, y_key])
-        hist["group_id"] = f"{config['prefix']}_{group_val}"
-        all_dfs.append(hist)
+        hist = run.scan_history(keys=[x_key, y_key])
+        hist_data = [row for row in hist]
+
+        if hist_data:
+            hist = pd.DataFrame(hist_data)
+            hist["group_id"] = f"{config['prefix']}_{group_val}"
+            all_dfs.append(hist)
 
     if not all_dfs:
         print("조건에 맞는 Run을 찾지 못했습니다!")
