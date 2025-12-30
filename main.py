@@ -234,9 +234,10 @@ def main(_):
                         video_frame_skip=FLAGS.video_frame_skip,
                     )
                     logger.log(eval_info, log_step, "eval")
-                    wandb.log({
-                        f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
-                    }, step=log_step)
+                    if video is not None:
+                        wandb.log({
+                            f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
+                        }, step=log_step)
 
 if __name__ == '__main__':
     app.run(main)

@@ -4,11 +4,10 @@ MUJOCO_GL=egl
 python main.py \
     --agent "agents/$3.py" \
     --project "debs" \
-    --run_group=$3 \
+    --run_group $3 \
     --task_name $1 \
     --task_num $2 \
-    --env_name=$1-singletask-v0 \ 
-    --sparse=False \
+    --env_name "$1-singletask-v0" \
     --horizon_length 5 \
     --agent.lr 3e-4 \
     --eval_interval 10000 \
