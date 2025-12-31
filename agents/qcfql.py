@@ -11,7 +11,7 @@ from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, Value
 
-class ACFQLAgent(flax.struct.PyTreeNode):
+class QCFQLAgent(flax.struct.PyTreeNode):
     """Flow Q-learning (FQL) agent with action chunking. 
     """
 
@@ -322,7 +322,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='acfql',  # Agent name.
+            agent_name='qcfql',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.

@@ -208,8 +208,6 @@ def main(_):
         
         # saving
         if FLAGS.save_interval > 0 and i % FLAGS.eval_interval == 0:
-            save_agent(agent, FLAGS.save_dir, log_step)
-
             if (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
                 # during eval, the action chunk is executed fully
                 if "bandit" in FLAGS.env_name:
@@ -234,10 +232,11 @@ def main(_):
                         video_frame_skip=FLAGS.video_frame_skip,
                     )
                     logger.log(eval_info, log_step, "eval")
-                    if video is not None:
+                    if len(video) > 0:
                         wandb.log({
                             f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
                         }, step=log_step)
+    save_agent(agent, FLAGS.save_dir, log_step)
 
 if __name__ == '__main__':
     app.run(main)

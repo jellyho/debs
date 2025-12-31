@@ -45,7 +45,6 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             q = qs.mean(axis=0) # For logging
 
         elif self.config['rl_method'] == 'ddpg':
-            ## TBD
             rng, sample_rng = jax.random.split(rng, 2)
             next_actions = self.sample_actions(batch['next_observations'], rng=sample_rng)
             

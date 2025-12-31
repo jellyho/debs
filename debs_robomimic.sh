@@ -4,8 +4,8 @@ export MUJOCO_GL="egl"
 
 python main.py \
     --agent "agents/$2.py" \
-    --project "debs" \
-    --run_group $2 \
+    --project "MFQ" \
+    --run_group "$2:$5" \
     --task_name $1 \
     --env_name "$1-mh-low_dim" \
     --horizon_length 5 \
@@ -21,5 +21,6 @@ python main.py \
     --agent.num_critic 2 \
     --agent.latent_dist "$3" \
     --agent.alpha $4 \
+    # --agent.weight_decay 0.1
 
 # #-task$2-v0 \

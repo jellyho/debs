@@ -1,4 +1,4 @@
-from agents.acfql import ACFQLAgent
+from agents.qcfql import QCFQLAgent
 from agents.fql import FQLAgent
 from agents.hlmeanflowq import HLMEANFLOWQAgent
 from agents.meanflowq import MEANFLOWQAgent
@@ -7,7 +7,7 @@ from agents.meanflow import MEANFLOWAgent
 from agents.flow import FLOWAgent
 
 agents = dict(
-    acfql=ACFQLAgent,
+    qcfql=QCFQLAgent,
     fql=FQLAgent,
     hlmeanflowq=HLMEANFLOWQAgent,
     meanflowq=MEANFLOWQAgent,

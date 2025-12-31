@@ -88,6 +88,10 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
                 t - r, # This seems to work better
                 params=grad_params
             )
+        
+        def reform_forward(z, t, r):
+            u_theta = mean_flow_forward(z, t, r)
+            return z - u_theta
 
         if self.config['mf_method'] == 'mf':
             u, dudt = jax.jvp(
@@ -106,6 +110,18 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             u, dudt = z - x_pred, v - dxdt
             u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
             u_tgt = jax.lax.stop_gradient(u_tgt)
+        elif self.config['mf_method'] == 'mfql':
+            g, dgdt = jax.jvp(
+                reform_forward,
+                (z, t, r),
+                (v, jnp.ones_like(t), jnp.zeros_like(r))
+            )
+
+            g_tgt = z + (t - r - 1.0) * v - (t - r) * dgdt
+            g_tgt = jax.lax.stop_gradient(g_tgt)
+
+            u = g
+            u_tgt = g_tgt
 
         loss = self.adaptive_l2_loss(batch_size, u - u_tgt)
 
@@ -332,8 +348,8 @@ def get_config():
             late_update=False,
             latent_dist='uniform',
             extract_method='awr', # 'ddpg', 'awr',,
-            alpha=1.0
-
+            alpha=1.0,
+            use_mf_ema=False,
         )
     )
     return config

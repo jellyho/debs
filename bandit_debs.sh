@@ -13,7 +13,7 @@ python main.py \
     --video_episodes 1 \
     --offline_steps 100000 \
     --save_dir "exp/" \
-    --agent.mf_method='jit_mf' \
+    --agent.mf_method='mfql' \
     --agent.rl_method='ddpg' \
     --agent.extract_method='onestep_ddpg' \
     --agent.num_critic=2 \

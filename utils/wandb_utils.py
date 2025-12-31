@@ -14,13 +14,12 @@ def get_filtered_data(entity, project, config, x_key='_step', y_key='eval/succes
     query_filters = {}
     for k, v in config['filters'].items():
         # config.으로 시작하지 않는 일반 키(group, state 등) 처리
-        if "." in k and not k.startswith("config.") and k != "summary_metrics":
-            if isinstance(v, list):
-                # [핵심] 사용자가 ["A", "B"]로 넣으면 -> {"$in": ["A", "B"]}로 변환하여 API에 전달
-                query_filters[k] = {"$in": v}
-            else:
-                query_filters[k] = v
-        query_filters[k] = v
+        # if "." in k and not k.startswith("config.") and k != "summary_metrics":
+        if isinstance(v, list):
+            query_filters[k] = {"$in": v}
+        else:
+            query_filters[k] = v
+        # query_filters[k] = v
 
     print(f"Fetching runs with filters: {query_filters}...")
     runs = api.runs(f"{entity}/{project}", filters=query_filters)
@@ -41,13 +40,10 @@ def get_filtered_data(entity, project, config, x_key='_step', y_key='eval/succes
             if target_values is not None and group_val not in target_values:
                 continue
 
-        hist = run.scan_history(keys=[x_key, y_key])
-        hist_data = [row for row in hist]
+        hist = run.history(keys=[x_key, y_key])
 
-        if hist_data:
-            hist = pd.DataFrame(hist_data)
-            hist["group_id"] = f"{config['prefix']}_{group_val}"
-            all_dfs.append(hist)
+        hist["group_id"] = f"{config['prefix']}_{group_val}"
+        all_dfs.append(hist)
 
     if not all_dfs:
         print("조건에 맞는 Run을 찾지 못했습니다!")
@@ -92,6 +88,7 @@ def plot_custom_config(df, filename='plot'):
     colors = sns.color_palette("husl", len(groups))
 
     for i, group_name in enumerate(groups):
+        print("Plotting group", group_name)
         # 해당 그룹 데이터 추출
         group_df = df[df["group_id"] == group_name]
         if group_df.empty: continue
@@ -149,4 +146,4 @@ def plot_and_save_from_wandb(PLOT_CONFIG):
     if len(dfs) > 0:
         dfs = pd.concat(dfs)
     # return dfs
-    plot_custom_config(dfs, PLOT_CONFIG['title'])
+    plot_custom_config(dfs, f"{PLOT_CONFIG['folder']}/{PLOT_CONFIG['title']}")
