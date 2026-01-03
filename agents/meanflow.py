@@ -60,7 +60,13 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         elif self.config['time_dist'] == 'beta':
             t = jax.random.beta(t_rng, 6.0, 6.0, shape=[batch_size, 1])
             r = jax.random.beta(r_rng, 6.0, 6.0, shape=[batch_size, 1])
-        elif self.config['time_idst']
+            t, r = jnp.maximum(t, r), jnp.minimum(t, r)
+        elif self.config['time_idst'] == 'discrete':
+            time_steps = self.config.get('time_steps', 50)
+            time_values = jnp.linspace(1/time_steps, 1.0, time_steps)
+            indices = jax.random.randint(t_rng, (batch_size, 1), 0, time_steps)
+            t = time_values[indices].reshape(-1, 1)
+            r = jnp.zeros((batch_size, 1))
 
         data_size = int(batch_size * (self.config['flow_ratio']))
         zero_mask = jnp.arange(batch_size) < data_size
@@ -394,7 +400,7 @@ def get_config():
             weight_decay=0.,
             rl_method='iql', # DDPG, IQL
             expectile_tau=0.9,
-            flow_ratio=0.75,
+            flow_ratio=0.50,
             mf_method='jit_mf',
             late_update=False,
             latent_dist='uniform',

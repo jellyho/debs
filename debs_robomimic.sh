@@ -20,7 +20,7 @@ python main.py \
     --agent.extract_method "ddpg" \
     --agent.num_critic 2 \
     --agent.latent_dist "$3" \
-    --agent.time_dist "beta" \
+    --agent.time_dist "lognorm_rzero" \
     --agent.alpha $4 \
     # --agent.weight_decay 0.1
 
