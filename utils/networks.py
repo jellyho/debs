@@ -573,13 +573,18 @@ class ActorMeanFlowField(nn.Module):
     action_dim: int
     layer_norm: bool = False
     encoder: nn.Module = None
+    use_fourier_features: bool = False
+    fourier_feature_dim: int = 16
 
     def setup(self) -> None:
         # Standard MLP for the vector field
         self.mlp = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
+        # Fourier Features for Timestep (t)
+        if self.use_fourier_features:
+            self.ff = FourierFeatures(self.fourier_feature_dim)
 
     @nn.compact
-    def __call__(self, observations, actions, r, t, g=None, is_encoded=False):
+    def __call__(self, observations, actions, r, t=None, g=None, is_encoded=False):
         """
         Return the vectors at the given states, actions, advantage, and times.
 
@@ -596,7 +601,11 @@ class ActorMeanFlowField(nn.Module):
             observations = self.encoder(observations)
 
         # 3. Construct Input List
-        inputs_list = [observations, actions, r, t]
+        inputs_list = [observations, actions, r]
+        if t is not None:
+            if self.use_fourier_features:
+                t = self.ff(t)
+            inputs_list.append(t)
 
         if g is not None:
             inputs_list.append(g)

@@ -72,6 +72,11 @@ class LoggingHelper:
             self.wandb_logger.log({f'{prefix}/{k}': self.iterate(k, v) for k, v in data.items()}, step=step)
 
 def main(_):
+    import robosuite
+
+    env = robosuite.make('Lift', robots='Panda')
+    obs = env.reset()
+    print(obs['agentview_image'].shape)
     if FLAGS.task_config != 'NO':
         suite, task_name, alpha, task_num = FLAGS.task_config.split(':')
         FLAGS.task_name = str(task_name)

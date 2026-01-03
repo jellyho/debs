@@ -89,3 +89,4 @@ robomimic
 wandb[media]
 opencv-python
 seaborn
+scikit-learn

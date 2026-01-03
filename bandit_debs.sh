@@ -13,10 +13,10 @@ python main.py \
     --video_episodes 1 \
     --offline_steps 100000 \
     --save_dir "exp/" \
-    --agent.mf_method='mfql' \
+    --agent.mf_method='jit_mf' \
     --agent.rl_method='ddpg' \
     --agent.extract_method='onestep_ddpg' \
     --agent.num_critic=2 \
-    --agent.latent_dist='normal' \
+    --agent.latent_dist='sphere' \
     --agent.late_update=False \
     --agent.alpha 0.1 \
