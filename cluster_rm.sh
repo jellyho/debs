@@ -4,7 +4,7 @@
 export PART='base_suma_rtx3090'
 export QOS='base_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="jit_mf_time_dist"
+export JOBNAME="jit_mf_time_dist_discrete"
 export MODEL="meanflow"
 
 
