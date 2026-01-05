@@ -10,6 +10,7 @@ import optax
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorMeanFlowField
+from utils.dit import MFDiT
 
 class MEANFLOWAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
@@ -314,14 +315,24 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             encoder_module = encoder_modules[config['encoder']]
             encoders['actor_bc_flow'] = encoder_module()
 
-        actor_bc_flow_def = ActorMeanFlowField(
-            hidden_dims=config['actor_hidden_dims'],
-            action_dim=full_action_dim,
-            layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_bc_flow'),
-            use_fourier_features=config['use_fourier_features'],
-            fourier_feature_dim=config['fourier_feature_dim']
-        )
+        if config['use_DiT']:
+            actor_bc_flow_def = MFDiT(
+                # input_dim=action_dim, 
+                hidden_dim=128,
+                depth=3,
+                num_heads=2,
+                output_dim=action_dim,  
+                encoder=encoders.get('actor_bc_flow'),
+            )
+        else:
+            actor_bc_flow_def = ActorMeanFlowField(
+                hidden_dims=config['actor_hidden_dims'],
+                action_dim=full_action_dim,
+                layer_norm=config['actor_layer_norm'],
+                encoder=encoders.get('actor_bc_flow'),
+                use_fourier_features=config['use_fourier_features'],
+                fourier_feature_dim=config['fourier_feature_dim']
+            )
 
         if config['time_r_zero'] or config['mf_method']=='imf':
             actor_input_shape = (ex_observations, full_actions, ex_times)
@@ -344,7 +355,10 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         if config["weight_decay"] > 0.:
             network_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
         else:
-            network_tx = optax.adam(learning_rate=config['lr'])
+            # if config['use_DiT']:
+            network_tx = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(learning_rate=config['lr']))
+            # else:
+            # network_tx = optax.adam(learning_rate=config['lr'])
 
         network_params = network_def.init(init_rng, **network_args)['params']
         network = TrainState.create(network_def, network_params, tx=network_tx)
@@ -355,6 +369,43 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         config['action_dim'] = action_dim
 
         return cls(rng, network=network, config=flax.core.FrozenDict(**config))
+    
+
+    def get_param_count(self):
+            """Calculate and return the number of parameters in the network."""
+            params = self.network.params
+            if hasattr(params, 'unfreeze'):
+                params = params.unfreeze()
+            
+            param_counts = {}
+            
+            # Calculate module-wise parameter counts
+            for module_name, module_params in params.items():
+                module_leaves = jax.tree_util.tree_leaves(module_params)
+                param_counts[module_name] = sum(param.size for param in module_leaves)
+            
+            # Calculate total parameters
+            all_leaves = jax.tree_util.tree_leaves(params)
+            param_counts['total'] = sum(param.size for param in all_leaves)
+            
+            return param_counts
+
+    def print_param_stats(self):
+        """Print network parameter statistics."""
+        param_counts = self.get_param_count()
+        
+        print("Network Parameter Statistics:")
+        print("-" * 50)
+        
+        # Print module-wise parameter counts
+        for module_name, count in param_counts.items():
+            if module_name != 'total':
+                print(f"{module_name}: {count:,} parameters ({count * 4 / (1024**2):.2f} MB)")
+        
+        # Print total parameter count
+        total = param_counts['total']
+        print("-" * 50)
+        print(f"Total parameters: {total:,} ({total * 4 / (1024**2):.2f} MB)")
 
 
 def get_config():
@@ -390,6 +441,7 @@ def get_config():
             time_r_zero=False,
             extract_method='awr', # 'ddpg', 'awr',,
             alpha=1.0,
+            use_DiT=False,
         )
     )
     return config

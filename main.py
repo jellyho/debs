@@ -72,11 +72,6 @@ class LoggingHelper:
             self.wandb_logger.log({f'{prefix}/{k}': self.iterate(k, v) for k, v in data.items()}, step=step)
 
 def main(_):
-    import robosuite
-
-    env = robosuite.make('Lift', robots='Panda')
-    obs = env.reset()
-    print(obs['agentview_image'].shape)
     if FLAGS.task_config != 'NO':
         suite, task_name, alpha, task_num = FLAGS.task_config.split(':')
         FLAGS.task_name = str(task_name)
@@ -165,12 +160,12 @@ def main(_):
         # dataset.additional_normalize_rewards_scale = FLAGS.additional_normalize_rewards_scale
         # if config['agent_name'] == 'rebrac' or config['agent_name'] == 'sarsa_fql':
         #     dataset.return_next_actions = True
-        if 'bandit' in FLAGS.env_name:
-            dataset.v_max = 1
-            dataset.v_min = 0
-        elif 'singletask' in FLAGS.env_name:
-            dataset.v_min = 1 / (1 - dataset.discount) * dataset['rewards'].min().item()
-            dataset.v_max = 0
+        # if 'bandit' in FLAGS.env_name:
+        #     dataset.v_max = 1
+        #     dataset.v_min = 0
+        # elif 'singletask' in FLAGS.env_name:
+        #     dataset.v_min = 1 / (1 - dataset.discount) * dataset['rewards'].min().item()
+        #     dataset.v_max = 0
         return dataset
     
     train_dataset = process_train_dataset(train_dataset)
@@ -192,6 +187,9 @@ def main(_):
         example_batch['actions'],
         config,
     )
+
+    if config['agent_name'] == 'meanflow':
+        agent.print_param_stats()
 
     # Setup logging.
     prefixes = ["eval", "env"]

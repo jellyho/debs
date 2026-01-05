@@ -49,6 +49,8 @@ class Identity(nn.Module):
     def __call__(self, x):
         return x
 
+def zero_init():
+    return nn.initializers.zeros
 
 class MLP(nn.Module):
     """Multi-layer perceptron.
