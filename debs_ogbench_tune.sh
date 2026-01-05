@@ -7,8 +7,8 @@ python main.py \
     --project "MFQ" \
     --run_group "$2:$5" \
     --task_name $1 \
-    --env_name "$1-mh-low_dim" \
-    --horizon_length 1 \
+    --env_name "$1-singletask-v0" \
+    --horizon_length 5 \
     --agent.lr 3e-4 \
     --eval_interval 100000 \
     --eval_episodes 50 \
@@ -19,7 +19,8 @@ python main.py \
     --agent.rl_method "ddpg" \
     --agent.extract_method "ddpg" \
     --agent.num_critic 2 \
-    
-    # --agent.latent_dist "$3" \
-    # --agent.time_dist "$6" \
-    # --agent.alpha $4 \
+    --agent.latent_dist "$3" \
+    --agent.alpha $4 \
+    # --agent.weight_decay 0.1
+
+# #-task$2-v0 \

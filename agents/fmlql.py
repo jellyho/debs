@@ -11,7 +11,7 @@ from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, Value
 
-class QCFLQLAgent(flax.struct.PyTreeNode):
+class FMLQLAgent(flax.struct.PyTreeNode):
     """Flow Q-learning (FQL) agent with action chunking. 
     """
 
@@ -47,10 +47,12 @@ class QCFLQLAgent(flax.struct.PyTreeNode):
             params=grad_params
         )
 
-        target_q = batch['rewards'][..., -1] + \
+        target_q = batch['rewards'] + \
             (self.config['discount'] ** self.config["horizon_length"]) * batch['masks'] * next_q
 
+        
         critic_loss = (jnp.square(qs - jnp.broadcast_to(target_q, qs.shape))).mean()
+
         q = qs.mean(axis=0) # For logging
 
         return critic_loss, {
@@ -142,10 +144,7 @@ class QCFLQLAgent(flax.struct.PyTreeNode):
         else:
             x_pred = self.compute_flow_actions(observations, z_pred)
 
-        if self.config['mf_method'] == 'mf':
-            a_pred_flat = z_pred - jnp.reshape(x_pred, (batch_size, latent_dim))
-        elif self.config['mf_method'] == 'jit_mf':
-            a_pred_flat = jnp.reshape(x_pred, (batch_size, latent_dim))
+        a_pred_flat = jnp.reshape(x_pred, (batch_size, latent_dim))
 
         info_dict = {
             'z_norm': jnp.mean(jnp.square(z_pred)),
@@ -166,11 +165,9 @@ class QCFLQLAgent(flax.struct.PyTreeNode):
             loss = -q.mean()
             lam = jax.lax.stop_gradient(1 / jnp.abs(q).mean())
             loss = self.config['alpha'] * lam * loss
+
         elif self.config['extract_method'] == 'onestep_ddpg':
-            if self.config['mf_method'] == 'mf':
-                a_pred_flat_onestep = z_pred - jnp.reshape(x_pred_onestep, (batch_size, latent_dim))
-            elif self.config['mf_method'] == 'jit_mf':
-                a_pred_flat_onestep = jnp.reshape(x_pred_onestep, (batch_size, latent_dim))
+            a_pred_flat_onestep = jnp.reshape(x_pred_onestep, (batch_size, latent_dim))
                 
             qs = self.network.select('critic')(
                 observations,
@@ -200,7 +197,7 @@ class QCFLQLAgent(flax.struct.PyTreeNode):
         info = {}
         rng = rng if rng is not None else self.rng
 
-        rng, actor_rng, critic_rng = jax.random.split(rng, 3)
+        rng, actor_rng, critic_rng, latent_rng = jax.random.split(rng, 4)
 
         critic_loss, critic_info = self.critic_loss(batch, grad_params, critic_rng)
         for k, v in critic_info.items():
@@ -210,7 +207,11 @@ class QCFLQLAgent(flax.struct.PyTreeNode):
         for k, v in actor_info.items():
             info[f'actor/{k}'] = v
 
-        loss = critic_loss + actor_loss
+        latent_loss, latent_info = self.latent_actor_loss(batch, grad_params, latent_rng)
+        for k, v in latent_info.items():
+            info[f'latent/{k}'] = v
+
+        loss = critic_loss + actor_loss + latent_loss
         return loss, info
 
     def target_update(self, network, module_name):
@@ -254,17 +255,25 @@ class QCFLQLAgent(flax.struct.PyTreeNode):
         latent_dim = self.config["horizon_length"] * self.config["action_dim"]
         rng, x_rng = jax.random.split(rng, 2)
 
-        e = self.sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim))
-        actions = self.network.select(f'actor_onestep_flow')(
-            observations, 
-            e
-        )
-        actions = jnp.clip(actions, -1, 1)
+        if self.config['extract_method'] == 'onestep_ddpg':
+            rng, x_rng = jax.random.split(rng, 2)
+            e = self.sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim))
+            noises = self.network.select('latent_actor')(
+                observations, 
+                e,
+            )
+        else:
+            noises = self.network.select('latent_actor')(
+                observations, 
+            )
+
+        actions = self.compute_flow_actions(observations, noises)
         actions = jnp.reshape(
             actions, 
             (*observations.shape[: -len(self.config['ob_dims'])],  # batch_size
             self.config["horizon_length"], self.config["action_dim"])
         )
+        actions = jnp.clip(actions, -1, 1)
         return actions
 
     @jax.jit
@@ -320,7 +329,6 @@ class QCFLQLAgent(flax.struct.PyTreeNode):
             encoder_module = encoder_modules[config['encoder']]
             encoders['critic'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()
-            encoders['actor_onestep_flow'] = encoder_module()
 
         # Define networks.
         critic_def = Value(
@@ -335,22 +343,28 @@ class QCFLQLAgent(flax.struct.PyTreeNode):
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
             encoder=encoders.get('actor_bc_flow'),
-            use_fourier_features=config["use_fourier_features"],
-            fourier_feature_dim=config["fourier_feature_dim"],
         )
-        actor_onestep_flow_def = ActorVectorField(
+
+        latent_actor_def = ActorVectorField(
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
             encoder=encoders.get('actor_onestep_flow'),
+            latent_dist=config['latent_dist']
         )
+
+        if config['extract_method'] == 'onestep_ddpg':
+            latent_actor_input_shape = (ex_observations, full_actions)
+        else:
+            latent_actor_input_shape = (ex_observations)
 
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
-            actor_onestep_flow=(actor_onestep_flow_def, (ex_observations, full_actions)),
+            latent_actor=(latent_actor_def, latent_actor_input_shape),
             critic=(critic_def, (ex_observations, full_actions)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations, full_actions)),
         )
+
         if encoders.get('actor_bc_flow') is not None:
             # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
             network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
@@ -380,7 +394,7 @@ class QCFLQLAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='qcfql',  # Agent name.
+            agent_name='fmlql',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.

@@ -516,7 +516,6 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             (*observations.shape[: -len(self.config['ob_dims'])],  # batch_size
             self.config["horizon_length"], self.config["action_dim"])
         )
-            
         return actions
 
     @jax.jit
@@ -568,7 +567,6 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         ob_dims = ex_observations.shape[-1:]
         action_dim = ex_actions.shape[-1]
         
-        # full_actions = jnp.concatenate([ex_actions] * config["horizon_length"], axis=-1)
         full_actions = jnp.reshape(
             ex_actions,
             (ex_actions.shape[0], -1)
@@ -677,13 +675,13 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
-            rl_method='iql', # DDPG, IQL
+            rl_method='ddpg', # DDPG, IQL
             expectile_tau=0.9,
             flow_ratio=0.25,
             mf_method='jit_mf',
             late_update=False,
-            latent_dist='uniform',
-            extract_method='awr', # 'ddpg', 'awr',,
+            latent_dist='sphere',
+            extract_method='ddpg', # 'ddpg', 'awr',,
             alpha=1.0
 
         )

@@ -45,36 +45,64 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         loss = w * delta_sq
         
         return loss.mean()
+    
+    def sample_t(self, batch_size, rng):
+        if self.config['time_dist'] == 'log_norm':
+            t = jax.nn.sigmoid(jax.random.normal(rng, [batch_size, 1]) - 0.4)
+        elif self.config['time_dist'] == 'beta':
+            t = jax.random.beta(rng, 6.0, 6.0, shape=[batch_size, 1])
+        elif self.config['time_dist'] == 'discrete':
+            time_steps = self.config.get('time_steps', 50)
+            time_values = jnp.linspace(1/time_steps, 1.0, time_steps)
+            indices = jax.random.randint(rng, (batch_size, 1), 0, time_steps)
+            t = time_values[indices].reshape(-1, 1)
+        elif self.config['time_dist'] == 'uniform':
+            t = jax.random.uniform(rng, (batch_size, 1))
+        return t
 
     def sample_t_r(self, batch_size, rng):
         # lognorm sampling (Seems working better than uniform)
         rng, t_rng, r_rng = jax.random.split(rng, 3)
 
-        if self.config['time_dist'] == 'log_norm':
-            t = jax.nn.sigmoid(jax.random.normal(t_rng, [batch_size, 1]) - 0.4)
-            r = jax.nn.sigmoid(jax.random.normal(r_rng, [batch_size, 1]) - 0.4)
+        t = self.sample_t(batch_size, t_rng)
+
+        if self.config['time_r_zero']:
+            return t, jnp.zeros_like(t), jnp.ones_like(t), jnp.zeros_like(t)
+        else:
+            r = self.sample_t(batch_size, r_rng)
             t, r = jnp.maximum(t, r), jnp.minimum(t, r)
-        elif self.config['time_dist'] == 'log_norm_rzero':
-            t = jax.nn.sigmoid(jax.random.normal(t_rng, [batch_size, 1]) - 0.4)
-            r = jnp.zeros((batch_size, 1))
-        elif self.config['time_dist'] == 'beta':
-            t = jax.random.beta(t_rng, 6.0, 6.0, shape=[batch_size, 1])
-            r = jax.random.beta(r_rng, 6.0, 6.0, shape=[batch_size, 1])
-            t, r = jnp.maximum(t, r), jnp.minimum(t, r)
-        elif self.config['time_idst'] == 'discrete':
-            time_steps = self.config.get('time_steps', 50)
-            time_values = jnp.linspace(1/time_steps, 1.0, time_steps)
-            indices = jax.random.randint(t_rng, (batch_size, 1), 0, time_steps)
-            t = time_values[indices].reshape(-1, 1)
-            r = jnp.zeros((batch_size, 1))
+            data_size = int(batch_size * (self.config['flow_ratio']))
+            zero_mask = jnp.arange(batch_size) < data_size
+            zero_mask = zero_mask.reshape(batch_size, 1)
+            r = jnp.where(zero_mask, t, r)
 
-        data_size = int(batch_size * (self.config['flow_ratio']))
-        zero_mask = jnp.arange(batch_size) < data_size
-        zero_mask = zero_mask.reshape(batch_size, 1)
-        r = jnp.where(zero_mask, t, r)
-
-        return t, r
-
+            return t, r, jnp.ones_like(t), jnp.zeros_like(r)
+    
+    def mean_flow_forward(self, o, z, t, r=None, params=None):
+        # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
+        if self.config['time_r_zero']:
+            return self.network.select('actor_bc_flow')(
+                o, 
+                z, 
+                t, 
+                params=params
+            )
+        elif self.config['mf_method'] == 'imf':
+            return self.network.select('actor_bc_flow')(
+                o, 
+                z, 
+                t - r, 
+                params=params
+            )
+        else:
+            return self.network.select('actor_bc_flow')(
+                o, 
+                z, 
+                t, 
+                t - r, # This seems to work better
+                params=params
+            )
+        
     def actor_loss(self, batch, grad_params, rng):
         """Compute the FQL actor loss."""
         batch_actions = jnp.reshape(batch["actions"], (batch["actions"].shape[0], -1))  # fold in horizon_length together with action_dim
@@ -83,87 +111,55 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
 
         # BC mean flow loss.
         x = batch_actions
-
-        if self.config['mf_method'] == 'mfql':
-            # MFQL은 r=0 고정이므로 t만 샘플링 (Uniform 추천)
-            t = jax.random.uniform(t_rng, (batch_size, 1))
-            r = None # 사용 안 함
-        else:
-            t, r = self.sample_t_r(batch_size, t_rng)
+        t, r, jt, jr = self.sample_t_r(batch_size, t_rng)
 
         ##### It does not need to be normal distirbution
         e = self.sample_latent_dist(x_rng, (batch_size, action_dim))
         z = (1 - t) * x + t * e
 
-        def mean_flow_forward(z, t, r=None):
-            # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
-            if r is not None:
-                return self.network.select('actor_bc_flow')(
-                    batch['observations'], 
-                    z, 
-                    t, 
-                    t - r, # This seems to work better
-                    params=grad_params
-                )
-            else:
-                return self.network.select('actor_bc_flow')(
-                    batch['observations'], 
-                    z, 
-                    t, 
-                    params=grad_params
-                )
+        partial_mf = lambda z, t, r: self.mean_flow_forward(
+                o=batch['observations'], 
+                z=z, 
+                t=t, 
+                r=r,
+                params=grad_params
+            )
 
         if self.config['mf_method'] == 'mf':
             v = e - x
             u, dudt = jax.jvp(
-                mean_flow_forward, 
+                partial_mf, 
                 (z, t, r), 
-                (v, jnp.ones_like(t), jnp.zeros_like(r))
+                (v, jt, jr)
             )
             u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
             u_tgt = jax.lax.stop_gradient(u_tgt)
             err = u - u_tgt
         elif self.config['mf_method'] == 'imf':
-            v = mean_flow_forward(z, t, t)
+            v = partial_mf(z, t, t)
             u, dudt = jax.jvp(
-                mean_flow_forward, 
+                partial_mf, 
                 (z, t, r), 
-                (v, jnp.ones_like(t), jnp.zeros_like(r))
+                (v, jt, jr)
             )
             V = u + (t - r) * jax.lax.stop_gradient(dudt)
             err = V - (e - x)
-
         elif self.config['mf_method'] == 'jit_mf':
             v = e - x
             x_pred, dxdt = jax.jvp(
-                mean_flow_forward, 
+                partial_mf, 
                 (z, t, r), 
-                (v, jnp.ones_like(t), jnp.zeros_like(r))
+                (v, jt, jr)
             )
             u, dudt = z - x_pred, v - dxdt
             u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
             u_tgt = jax.lax.stop_gradient(u_tgt)
             err = u - u_tgt
-        elif self.config['mf_method'] == 'mfql':
-            v = e - x
-            g, dgdt = jax.jvp(
-                mean_flow_forward,
-                (z, t),
-                (v, jnp.ones_like(t),)
-            )
-
-            g_tgt = z + (t - 1.0) * v - t * dgdt
-            g_tgt = jax.lax.stop_gradient(g_tgt)
-            err = g - g_tgt
-
 
         loss = self.adaptive_l2_loss(batch_size, err)
 
         return loss, {
             'actor_loss': loss,
-            # 'mf/u_mean': u.mean(),
-            # 'mf/v_mean': v.mean(),
-            # 'mf/dudt_mean': dudt.mean(),
         }
 
     def sample_latent_dist(self, x_rng, sample_shape):
@@ -173,9 +169,6 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             e = jax.random.truncated_normal(x_rng, sample_shape)
         elif self.config['latent_dist'] == 'uniform':
             e = jax.random.uniform(x_rng, sample_shape, minval=-1.0, maxval=1.0)
-        elif self.config['latent_dist'] == 'simplex':
-            e = -jnp.log(jax.random.uniform(x_rng, sample_shape)) # Exponential
-            e = e / jnp.sum(e, axis=-1, keepdims=True) # Sum = 1
         elif self.config['latent_dist'] == 'sphere':
             e = jax.random.normal(x_rng, sample_shape)
             sq_sum = jnp.sum(jnp.square(e), axis=-1, keepdims=True)
@@ -276,20 +269,9 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         t = jnp.ones((*observation.shape[:-1], 1))
         r = jnp.zeros((*observation.shape[:-1], 1))
 
-        if self.config['mf_method'] == 'mfql':
-            output = self.network.select('actor_bc_flow')(
-                observation,
-                noise, 
-                t, 
-            )
-        else:        
-            output = self.network.select('actor_bc_flow')(
-                observation,
-                noise, 
-                t, 
-                t - r
-            )
-        if self.config['mf_method'] in ['jit_mf', 'mfql']:
+        output = self.mean_flow_forward(observation, noise, t, r)
+
+        if self.config['mf_method'] in ['jit_mf']:
             action = output
         elif self.config['mf_method'] in ['mf', 'imf']:
             action = noise - output
@@ -341,7 +323,7 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             fourier_feature_dim=config['fourier_feature_dim']
         )
 
-        if config['mf_method'] == 'mfql':
+        if config['time_r_zero'] or config['mf_method']=='imf':
             actor_input_shape = (ex_observations, full_actions, ex_times)
         else:
             actor_input_shape = (ex_observations, full_actions, ex_times, ex_times)
@@ -405,6 +387,7 @@ def get_config():
             late_update=False,
             latent_dist='uniform',
             time_dist='log_norm', # log_norm, beta
+            time_r_zero=False,
             extract_method='awr', # 'ddpg', 'awr',,
             alpha=1.0,
         )

@@ -39,8 +39,9 @@ class QCFQLAgent(flax.struct.PyTreeNode):
         else:
             next_q = next_qs.mean(axis=0)
         
-        target_q = batch['rewards'][..., -1] + \
+        target_q = batch['rewards'] + \
             (self.config['discount'] ** self.config["horizon_length"]) * batch['masks'] * next_q
+
 
         q = self.network.select('critic')(
             batch['observations'], 
