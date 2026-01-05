@@ -238,6 +238,131 @@ class FinalLayer(nn.Module):
         
         return x
 
+class FDiT(nn.Module):
+    """
+    Diffusion Transformer (DiT) model for 1D vector data.
+    """
+    input_dim: int = 0  # Set to 0 to infer from input
+    hidden_dim: int = 1152
+    depth: int = 28
+    num_heads: int = 16
+    mlp_ratio: float = 4.0
+    output_dim: int = 0  
+    encoder: Optional[nn.Module] = None
+    tanh_squash: bool = False  # Changed from True to False
+    final_fc_init_scale: float = 0.0  # Changed from 1e-4 to 0.0
+    use_output_layernorm: bool = False  # Changed from True to False
+    gradient_clip_norm: float = 1.0
+    residual_scale: float = 0.1
+    
+    def setup(self):
+        # Dual timestep embedders (keeping this unique feature)
+        self.t_embedder = TimestepEmbedder(dim=self.hidden_dim)
+        
+        # Positional embedding
+        self.pos_embed = self.param(
+            'pos_embed',
+            nn.initializers.normal(stddev=0.005), 
+            (1, 1, self.hidden_dim)
+        )
+        
+        # Transformer blocks
+        self.blocks = [
+            DiTBlock(
+                dim=self.hidden_dim,
+                num_heads=self.num_heads,
+                mlp_ratio=self.mlp_ratio
+            )
+            for _ in range(self.depth)
+        ]
+        
+        # Input encoder (simplified like MFDiT_SIM)
+        self.use_dynamic_embedder = (self.input_dim == 0)
+        self.feature_embedder = None
+        if self.use_dynamic_embedder:
+            # Embedder will be created dynamically per input
+            pass
+        else:
+            self.feature_embedder = FeatureEmbed(
+                input_dim=self.input_dim,
+                embed_dim=self.hidden_dim
+            )
+
+        # Final output dim fallback
+        if self.output_dim == 0:
+            self.output_dim = self.input_dim if self.input_dim > 0 else None
+
+        # Final layer
+        if self.output_dim is not None:
+            self.final_layer = FinalLayer(
+                dim=self.hidden_dim,
+                out_dim=self.output_dim,
+                init_scale=self.final_fc_init_scale
+            )
+        else:
+            self.final_layer = None  # Delay create
+    
+    @nn.compact
+    def __call__(self, observations, actions, t=None, is_encoded=False, train=True):
+        """
+        Forward pass of DiT.
+        observations: [..., obs_dim]
+        actions: [..., act_dim]
+        r: Additional timestep (optional)
+        t: Diffusion timestep (optional)
+        is_encoded: Whether observations are already encoded
+        train: Whether in training mode
+        """
+        if not is_encoded and self.encoder is not None:
+            observations = self.encoder(observations)
+            
+        # Combine obs and action
+        x_in = jnp.concatenate([observations, actions], axis=-1)
+        
+        # Dynamically create embedder and final layer if needed
+        if self.use_dynamic_embedder:
+            embedder = FeatureEmbed(input_dim=x_in.shape[-1], embed_dim=self.hidden_dim)
+            final_layer = FinalLayer(
+                dim=self.hidden_dim,
+                out_dim=x_in.shape[-1] if self.output_dim is None else self.output_dim,
+                init_scale=self.final_fc_init_scale
+            )
+        else:
+            embedder = self.feature_embedder
+            final_layer = self.final_layer
+
+        # Embed
+        x = embedder(x_in) + self.pos_embed  # shape: [B, 1, H]
+        
+        # Dual timestep embedding (keeping this unique feature)
+        if t is not None:
+            # Fallback to single timestep if only t is provided
+            t_emb = self.t_embedder(t)
+            c = t_emb
+        else:
+            c = jnp.zeros((x.shape[0], self.hidden_dim))
+        
+        # Transformer blocks with unified residual mix (like MFDiT_SIM)
+        for block in self.blocks:
+            x_res = x
+            x = block(x, c=c, deterministic=not train)
+            x = x_res + self.residual_scale * (x - x_res)
+
+        # Final projection
+        x = final_layer(x, c=c)
+        
+        # Collapse sequence dimension
+
+        if len(x.shape) == 3:
+            x = x[:, 0, :]
+        else:
+            x = x[0, :]
+
+        
+        if self.use_output_layernorm:
+            x = nn.LayerNorm(epsilon=1e-5)(x)
+        
+        return x
 
 class MFDiT(nn.Module):
     """

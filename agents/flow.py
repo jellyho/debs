@@ -10,6 +10,7 @@ import optax
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, Value
+from utils.dit import FDiT
 
 class FLOWAgent(flax.struct.PyTreeNode):
     """Flow Q-learning (FQL) agent with action chunking. 
@@ -140,10 +141,12 @@ class FLOWAgent(flax.struct.PyTreeNode):
             observations = self.network.select('actor_bc_flow_encoder')(observations)
 
         actions = noises
+        print(actions.shape)
         # Euler method.
         for i in range(self.config['flow_steps']):
             t = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps'])
             vels = self.network.select('actor_bc_flow')(observations, actions, t, is_encoded=True)
+            print(actions.shape, vels.shape)
             actions = actions + vels / self.config['flow_steps']
         actions = jnp.clip(actions, -1, 1)
         return actions
@@ -185,14 +188,24 @@ class FLOWAgent(flax.struct.PyTreeNode):
             encoders['actor_bc_flow'] = encoder_module()
 
         # Define networks.
-        actor_bc_flow_def = ActorVectorField(
-            hidden_dims=config['actor_hidden_dims'],
-            action_dim=full_action_dim,
-            layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_bc_flow'),
-            use_fourier_features=config["use_fourier_features"],
-            fourier_feature_dim=config["fourier_feature_dim"],
-        )
+
+        if config['use_DiT']:
+            actor_bc_flow_def = FDiT(
+                hidden_dim=256,
+                depth=3,
+                num_heads=2,
+                output_dim=full_action_dim,  
+                encoder=encoders.get('actor_bc_flow'),
+            )
+        else:
+            actor_bc_flow_def = ActorVectorField(
+                hidden_dims=config['actor_hidden_dims'],
+                action_dim=full_action_dim,
+                layer_norm=config['actor_layer_norm'],
+                encoder=encoders.get('actor_bc_flow'),
+                use_fourier_features=config["use_fourier_features"],
+                fourier_feature_dim=config["fourier_feature_dim"],
+            )
 
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
