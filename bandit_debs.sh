@@ -1,5 +1,4 @@
 #!/bin/bash
-# CUDA_VISIBLE_DEVICES=6
 
 MUJOCO_GL=egl
 python main.py \
@@ -15,8 +14,7 @@ python main.py \
     --save_dir "exp/" \
     --agent.mf_method='jit_mf' \
     --agent.rl_method='ddpg' \
-    --agent.extract_method='onestep_ddpg' \
+    --agent.extract_method='ddpg' \
     --agent.num_critic=2 \
     --agent.latent_dist='sphere' \
-    --agent.late_update=False \
-    --agent.alpha 0.1 \
+    --agent.alpha 1.0
