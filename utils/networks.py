@@ -1,4 +1,4 @@
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, Callable
 
 import distrax
 import flax.linen as nn
@@ -80,7 +80,6 @@ class MLP(nn.Module):
             if i == len(self.hidden_dims) - 2:
                 self.sow('intermediates', 'feature', x)
         return x
-
 
 class LogParam(nn.Module):
     """Scalar parameter module with log scale."""
@@ -274,41 +273,6 @@ class QuantileValue(nn.Module):
         z_quantiles = self.value_net(inputs)
         
         return z_quantiles
-
-class ActorZ(nn.Module):
-    """Actor vector field network for flow matching.
-
-    Attributes:
-        hidden_dims: Hidden layer dimensions.
-        action_dim: Action dimension.
-        layer_norm: Whether to apply layer normalization.
-        encoder: Optional encoder module to encode the inputs.
-    """
-
-    hidden_dims: Sequence[int]
-    action_dim: int
-    layer_norm: bool = False
-    encoder: nn.Module = None
-
-    def setup(self) -> None:
-        self.mlp = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
-
-    @nn.compact
-    def __call__(self, observations, is_encoded=False):
-        """Return the vectors at the given states, actions, and times (optional).
-
-        Args:
-            observations: Observations.
-            actions: Actions.
-            times: Times (optional).
-            is_encoded: Whether the observations are already encoded.
-        """
-        if not is_encoded and self.encoder is not None:
-            observations = self.encoder(observations)
-
-        z = self.mlp(observations)
-
-        return z
 
 class ActorVectorField(nn.Module):
     """Actor vector field network for flow matching.

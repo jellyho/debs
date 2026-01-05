@@ -251,8 +251,9 @@ def get_config():
             flow_ratio=0.25,
             mf_method='jit_mf',
             late_update=False,
-            latent_dist='uniform',
+            latent_dist='normal',
             extract_method='awr', # 'ddpg', 'awr',,
+            use_DiT=False,
         )
     )
     return config

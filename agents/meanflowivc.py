@@ -12,7 +12,7 @@ from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorMeanFlowField
 from utils.dit import MFDiT
 
-class MEANFLOWAgent(flax.struct.PyTreeNode):
+class MEANFLOWIVCAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
     """
     rng: Any
@@ -31,32 +31,21 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         ## THIS SHOULD BE modified so support horizion
         # 1. Sample별 Error 계산 (Sum of Squared Error)
         # Action Dim축으로 합침
-        # delta_sq = jnp.mean(jnp.square(error), axis=-1)
-        # delta_sq = jnp.maximum(delta_sq, 1e-12)
+        delta_sq = jnp.mean(jnp.square(error), axis=-1)
+        delta_sq = jnp.maximum(delta_sq, 1e-12)
         
-        # # 2. Adaptive Weight 계산 (Gradient 흐르지 않게 stop_gradient)
-        # # p = 1 - gamma (공식 코드 norm_p=1.0과 유사)
-        # w = jnp.power(delta_sq + c, p)
-        # w = jnp.maximum(w, 1e-12)
-        # w = 1.0 / w
-        # w = jnp.clip(w, 1e-6, 1e6)
-        # w = jax.lax.stop_gradient(w)
-        # # 3. Weighted Loss 계산
-        # # loss = w * ||u - u_tgt||^2
-        # loss = w * delta_sq
-
-        # error: (B, ...)
-        if error.ndim == 1:
-            delta_sq = error ** 2  # (B,)
-        else:
-            # mean over non-batch dims
-            delta_sq = jnp.square(error)
-        p = 1.0 - 0.5
-        w = 1.0 / jnp.power(delta_sq + c, p)  # (B,)
-        loss_per_sample = delta_sq  # (B,)
-        return (jax.lax.stop_gradient(w) * loss_per_sample).mean()
+        # 2. Adaptive Weight 계산 (Gradient 흐르지 않게 stop_gradient)
+        # p = 1 - gamma (공식 코드 norm_p=1.0과 유사)
+        w = jnp.power(delta_sq + c, p)
+        w = jnp.maximum(w, 1e-12)
+        w = 1.0 / w
+        w = jnp.clip(w, 1e-6, 1e6)
+        w = jax.lax.stop_gradient(w)
+        # 3. Weighted Loss 계산
+        # loss = w * ||u - u_tgt||^2
+        loss = w * delta_sq
         
-        # return loss.mean()
+        return loss.mean()
     
     def sample_t(self, batch_size, rng):
         if self.config['time_dist'] == 'log_norm':
@@ -76,19 +65,16 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         # lognorm sampling (Seems working better than uniform)
         rng, t_rng, r_rng = jax.random.split(rng, 3)
 
-        t = self.sample_t(batch_size, t_rng)
+        B = batch_size // 2
 
-        if self.config['time_r_zero']:
-            return t, jnp.zeros_like(t), jnp.ones_like(t), jnp.zeros_like(t)
-        else:
-            r = self.sample_t(batch_size, r_rng)
-            t, r = jnp.maximum(t, r), jnp.minimum(t, r)
-            data_size = int(batch_size * (self.config['flow_ratio']))
-            zero_mask = jnp.arange(batch_size) < data_size
-            zero_mask = zero_mask.reshape(batch_size, 1)
-            r = jnp.where(zero_mask, t, r)
+        t = self.sample_t(B, t_rng)
+        r = self.sample_t(B, r_rng)
+        t, r = jnp.maximum(t, r), jnp.minimum(t, r)
 
-            return t, r, jnp.ones_like(t), jnp.zeros_like(r)
+        t = jnp.concatenate([t, t], axis=0)
+        r = jnp.concatenate([r, t], axis=0)
+
+        return t, r, jnp.ones_like(t), jnp.zeros_like(r)
     
     def mean_flow_forward(self, o, z, t, r=None, params=None):
         # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
@@ -331,7 +317,7 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
                 hidden_dim=256,
                 depth=3,
                 num_heads=2,
-                output_dim=full_action_dim,  
+                output_dim=action_dim,  
                 encoder=encoders.get('actor_bc_flow'),
             )
         else:
@@ -365,10 +351,10 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         if config["weight_decay"] > 0.:
             network_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
         else:
-            # if config['use_DiT']:
-            #     network_tx = optax.chain(optax.clip_by_global_norm(10.0), optax.adam(learning_rate=config['lr']))
-            # else:
-            network_tx = optax.adam(learning_rate=config['lr'])
+            if config['use_DiT']:
+                network_tx = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(learning_rate=config['lr']))
+            else:
+                network_tx = optax.adam(learning_rate=config['lr'])
 
         network_params = network_def.init(init_rng, **network_args)['params']
         network = TrainState.create(network_def, network_params, tx=network_tx)
@@ -421,7 +407,7 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='meanflow',  # Agent name.
+            agent_name='meanflowivc',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
@@ -446,7 +432,7 @@ def get_config():
             flow_ratio=0.50,
             mf_method='jit_mf',
             late_update=False,
-            latent_dist='normal',
+            latent_dist='uniform',
             time_dist='log_norm', # log_norm, beta
             time_r_zero=False,
             extract_method='awr', # 'ddpg', 'awr',,
