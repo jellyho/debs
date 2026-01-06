@@ -83,8 +83,7 @@ def main(_):
     exp_name = get_exp_name(FLAGS.seed)
     run = setup_wandb(project=FLAGS.project, group=FLAGS.run_group, name=exp_name)
     run.tags = run.tags + (FLAGS.env_name,)
-    if 'meanflow' in FLAGS.agent.agent_name:
-        run.tags = run.tags + (FLAGS.agent.mf_method,)
+    
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
     flag_dict = get_flag_dict()

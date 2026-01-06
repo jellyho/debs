@@ -277,11 +277,10 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         for k, v in actor_info.items():
             info[f'actor/{k}'] = v
 
-        if not self.config['late_update']:
-            latent_loss, latent_info = self.latent_actor_loss(batch, grad_params, actor_rng)
-            loss += latent_loss
-            for k, v in latent_info.items():
-                info[f'latent/{k}'] = v
+        latent_loss, latent_info = self.latent_actor_loss(batch, grad_params, actor_rng)
+        loss += latent_loss
+        for k, v in latent_info.items():
+            info[f'latent/{k}'] = v
 
         return loss, info
 
@@ -323,10 +322,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         observations,
         rng=None,
     ):
-        if self.config['rl_method'] == 'iql':
-            return self.network.select('value')(observations)
-        else:
-            return jnp.zeros_like(observations)
+        return jnp.zeros_like(observations)
     
     @jax.jit
     def sample_actions(
@@ -378,10 +374,9 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             t, 
             t - r
         )
-        if self.config['mf_method'] == 'jit_mf':
-            action = output
-        elif self.config['mf_method'] == 'mf':
-            action = noise - output
+        
+        action = output
+        
         action = jnp.clip(action, -1, 1)
         return action
 
@@ -505,7 +500,6 @@ def get_config():
             fourier_feature_dim=64,
             weight_decay=0.,
             flow_ratio=0.25,
-            late_update=False,
             latent_dist='sphere',
             extract_method='ddpg', # 'ddpg', 'awr',,
             alpha=1.0
