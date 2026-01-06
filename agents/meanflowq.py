@@ -90,11 +90,13 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             )
 
         v = e - x
-        u, dudt = jax.jvp(
+
+        x_pred, dxdt = jax.jvp(
             mean_flow_forward, 
             (z, t, r), 
             (v, jnp.ones_like(t), jnp.zeros_like(r))
         )
+        u, dudt = z - x_pred, v - dxdt
         u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
         u_tgt = jax.lax.stop_gradient(u_tgt)
         err = u - u_tgt
@@ -265,7 +267,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
 
         if self.config['extract_method'] == 'onestep_ddpg':
             rng, x_rng = jax.random.split(rng, 2)
-            e = sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim), self.config['latent_dim'])
+            e = sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim), self.config['latent_dist'])
             noises = self.network.select('latent_actor')(
                 observations, 
                 e,
@@ -301,10 +303,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             t, 
             t - r
         )
-        
-        action = noise - output
-        
-        action = jnp.clip(action, -1, 1)
+        action = jnp.clip(output, -1, 1)
         return action
 
     @classmethod

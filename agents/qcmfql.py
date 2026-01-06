@@ -90,11 +90,12 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
             )
 
         v = e - x
-        u, dudt = jax.jvp(
+        x_pred, dxdt = jax.jvp(
             mean_flow_forward, 
             (z, t, r), 
             (v, jnp.ones_like(t), jnp.zeros_like(r))
         )
+        u, dudt = z - x_pred, v - dxdt
         u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
         u_tgt = jax.lax.stop_gradient(u_tgt)
         err = u - u_tgt
@@ -267,9 +268,7 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
             t, 
             t - r
         )
-        
-        action = noise - output
-        action = jnp.clip(action, -1, 1)
+        action = jnp.clip(output, -1, 1)
         return action
 
     @classmethod

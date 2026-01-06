@@ -45,11 +45,12 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             )
 
         v = e - x
-        u, dudt = jax.jvp(
+        x_pred, dxdt = jax.jvp(
             mean_flow_forward, 
             (z, t, r), 
             (v, jnp.ones_like(t), jnp.zeros_like(r))
         )
+        u, dudt = z - x_pred, v - dxdt
         u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
         u_tgt = jax.lax.stop_gradient(u_tgt)
         err = u - u_tgt
@@ -151,8 +152,7 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         r = jnp.zeros((*observation.shape[:-1], 1))
 
         output = self.network.select('actor_bc_flow')(observation, noise, t, r)
-        action = noise - output
-        action = jnp.clip(action, -1, 1)
+        action = jnp.clip(output, -1, 1)
         return action
 
     @classmethod
@@ -227,9 +227,6 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         if config["weight_decay"] > 0.:
             network_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
         else:
-            # if config['use_DiT']:
-            #     network_tx = optax.chain(optax.clip_by_global_norm(10.0), optax.adam(learning_rate=config['lr']))
-            # else:
             network_tx = optax.adam(learning_rate=config['lr'])
 
         network_params = network_def.init(init_rng, **network_args)['params']
