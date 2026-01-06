@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import ml_collections
 import optax
 
+from agents.meanflow_utils import adaptive_l2_loss, sample_t_r, sample_latent_dist
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorMeanFlowField, Value, ActorVectorField
@@ -62,51 +63,6 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             'q_min': q.min(),
         }
 
-    ## MF utils
-    def adaptive_l2_loss(self, batch_size, error, p=0.5, c=1e-3):
-        """
-        Adaptive L2 loss with Valid Masking.
-        Args:
-            error: (Batch, Total_Action_Dim) - Flattened error
-            valid_mask: (Batch,)
-        """
-        ## THIS SHOULD BE modified so support horizion
-        # 1. Sample별 Error 계산 (Sum of Squared Error)
-        # Action Dim축으로 합침
-        squared_error = jnp.mean(
-            jnp.reshape(
-                jnp.square(error), 
-                (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
-            ),
-            axis=(1, 2)
-        )
-        
-        # 2. Adaptive Weight 계산 (Gradient 흐르지 않게 stop_gradient)
-        # p = 1 - gamma (공식 코드 norm_p=1.0과 유사)
-        w = 1.0 / (squared_error + c) ** p
-        w = jax.lax.stop_gradient(w)
-        
-        # 3. Weighted Loss 계산
-        # loss = w * ||u - u_tgt||^2
-        loss = w * squared_error
-        
-        return loss.mean()
-
-    def sample_t_r(self, batch_size, rng):
-        # lognorm sampling (Seems working better than uniform)
-        rng, t_rng, r_rng = jax.random.split(rng, 3)
-
-        t = jax.nn.sigmoid(jax.random.normal(t_rng, [batch_size, 1]) - 0.4)
-        r = jax.nn.sigmoid(jax.random.normal(r_rng, [batch_size, 1]) - 0.4)
-        t, r = jnp.maximum(t, r), jnp.minimum(t, r)
-
-        data_size = int(batch_size * (1 - self.config['flow_ratio']))
-        zero_mask = jnp.arange(batch_size) < data_size
-        zero_mask = zero_mask.reshape(batch_size, 1)
-        r = jnp.where(zero_mask, t, r)
-
-        return t, r
-
     def actor_loss(self, batch, grad_params, rng):
         """Compute the FQL actor loss."""
         batch_actions = jnp.reshape(batch["actions"], (batch["actions"].shape[0], -1))  # fold in horizon_length together with action_dim
@@ -116,10 +72,10 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         # BC mean flow loss.
         x = batch_actions
 
-        t, r = self.sample_t_r(batch_size, t_rng)
+        t, r = sample_t_r(batch_size, t_rng, self.config['flow_ratio'])
 
         ##### It does not need to be normal distirbution
-        e = self.sample_latent_dist(x_rng, (batch_size, action_dim))
+        e = sample_latent_dist(x_rng, (batch_size, action_dim), self.config['latent_dist'])
         z = (1 - t) * x + t * e
         v = e - x
 
@@ -133,16 +89,17 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
                 params=grad_params
             )
 
-        x_pred, dxdt = jax.jvp(
+        v = e - x
+        u, dudt = jax.jvp(
             mean_flow_forward, 
             (z, t, r), 
             (v, jnp.ones_like(t), jnp.zeros_like(r))
         )
-        u, dudt = z - x_pred, v - dxdt
         u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
         u_tgt = jax.lax.stop_gradient(u_tgt)
+        err = u - u_tgt
 
-        loss = self.adaptive_l2_loss(batch_size, u - u_tgt)
+        loss = adaptive_l2_loss(err)
 
         return loss, {
             'actor_loss': loss,
@@ -151,29 +108,15 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             'mf/dudt_mean': dudt.mean(),
         }
 
-    def sample_latent_dist(self, x_rng, sample_shape):
-        if self.config['latent_dist'] == 'normal':
-            e = jax.random.normal(x_rng, sample_shape)
-        elif self.config['latent_dist'] == 'uniform':
-            e = jax.random.uniform(x_rng, sample_shape, minval=-1.0, maxval=1.0)
-        elif self.config['latent_dist'] == 'sphere':
-            e = jax.random.normal(x_rng, sample_shape)
-            sq_sum = jnp.sum(jnp.square(e), axis=-1, keepdims=True)
-            norm = jnp.sqrt(sq_sum + 1e-6)
-            e = e / norm * jnp.sqrt(sample_shape[-1])
-        return e
-
     def latent_actor_loss(self, batch, grad_params, rng):
         observations = batch['observations']
-        actions_gt = batch['actions'] # Dataset Actions (Ground Truth)
         batch_size = observations.shape[0]
         latent_dim = self.config['action_dim'] * self.config['horizon_length']
-        actions_gt_flat = jnp.reshape(actions_gt, (batch_size, latent_dim))      
         
         ### Query latent actor
         if self.config['extract_method'] == 'onestep_ddpg':
             rng, x_rng, l_rng = jax.random.split(rng, 3)
-            e = self.sample_latent_dist(x_rng, (batch_size, latent_dim))
+            e = sample_latent_dist(x_rng, (batch_size, latent_dim), self.config['latent_dist'])
             z_pred = self.network.select('latent_actor')(
                 observations, 
                 e,
@@ -217,10 +160,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             loss = self.config['alpha'] * lam * loss
 
         elif self.config['extract_method'] == 'onestep_ddpg':
-            if self.config['mf_method'] == 'mf':
-                a_pred_flat_onestep = z_pred - jnp.reshape(x_pred_onestep, (batch_size, latent_dim))
-            elif self.config['mf_method'] == 'jit_mf':
-                a_pred_flat_onestep = jnp.reshape(x_pred_onestep, (batch_size, latent_dim))
+            a_pred_flat_onestep = z_pred - jnp.reshape(x_pred_onestep, (batch_size, latent_dim))                
                 
             qs = self.network.select('critic')(
                 observations,
@@ -243,20 +183,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         info_dict['latent_loss'] = loss
 
         return loss, info_dict
-
-    @jax.jit
-    def total_latent_actor_loss(self, batch, grad_params, rng=None):
-        info = {}
-        rng = rng if rng is not None else self.rng
-
-        rng, actor_rng = jax.random.split(rng, 2)
-
-        actor_loss, actor_info = self.latent_actor_loss(batch, grad_params, actor_rng)
-        for k, v in actor_info.items():
-            info[f'latent/{k}'] = v
-
-        return actor_loss, info
-
+    
     @jax.jit
     def total_loss(self, batch, grad_params, rng=None):
         """Compute the total loss."""
@@ -338,7 +265,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
 
         if self.config['extract_method'] == 'onestep_ddpg':
             rng, x_rng = jax.random.split(rng, 2)
-            e = self.sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim))
+            e = sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim), self.config['latent_dim'])
             noises = self.network.select('latent_actor')(
                 observations, 
                 e,
@@ -375,7 +302,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             t - r
         )
         
-        action = output
+        action = noise - output
         
         action = jnp.clip(action, -1, 1)
         return action

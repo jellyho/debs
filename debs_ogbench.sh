@@ -16,8 +16,6 @@ python main.py \
     --video_episodes 10 \
     --offline_steps 1000000 \
     --save_dir "exp/" \
-    --agent.mf_method "jit_mf" \
-    --agent.rl_method "ddpg" \
     --agent.extract_method "ddpg" \
     --agent.num_critic 2 \
     --agent.latent_dist "$3" \

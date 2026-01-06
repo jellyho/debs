@@ -18,7 +18,9 @@ python main.py \
     --save_dir "exp/" \
     --agent.num_critic 2 \
     --agent.latent_dist "$3" \
-    --agent.use_DiT
+    --seed 100 \
+    --agent.extract_method "onestep_ddpg"
+    # --agent.use_DiT
     # --agent.time_dist "$6" \
     # --agent.alpha $4 \
     # --agent.extract_method "ddpg" \

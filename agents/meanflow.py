@@ -150,7 +150,7 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         t = jnp.ones((*observation.shape[:-1], 1))
         r = jnp.zeros((*observation.shape[:-1], 1))
 
-        output = self.mean_flow_forward(observation, noise, t, r)
+        output = self.network.select('actor_bc_flow')(observation, noise, t, r)
         action = noise - output
         action = jnp.clip(action, -1, 1)
         return action
