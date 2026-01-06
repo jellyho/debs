@@ -33,9 +33,7 @@ class FeatureEmbed(nn.Module):
             x = x[None, None, :]
         elif x.ndim == 2:
             x = x[:, None, :]
-        else:
-            shape = x.shape[:-1] + (1, x.shape[-1])
-            x = x.reshape(shape)
+
         if self.norm_layer is not None:
             x = self.norm_layer()(x)
         return x
@@ -523,6 +521,7 @@ class MFDiT_REAL(nn.Module):
             obs_len = 1
         else:
             obs_len = len(self.encoders) + 1 # image + state
+            print(f"[IMAGE INPUT] : {len(self.encoders)} image input detected")
 
         # Positional embedding
         self.pos_embed = self.param(
@@ -530,6 +529,8 @@ class MFDiT_REAL(nn.Module):
             nn.initializers.normal(stddev=0.005), 
             (1, obs_len + self.output_len, self.hidden_dim)
         )
+
+        print(f"Total input sequence to DiT : {obs_len} + {self.output_len} = {obs_len + self.output_len}")
         
         # Transformer blocks
         self.blocks = [
@@ -542,11 +543,11 @@ class MFDiT_REAL(nn.Module):
         ]
     
     @nn.compact
-    def __call__(self, state, observations=None, actions=None, r=None, t=None, is_encoded=False, train=True):
+    def __call__(self, observations, actions=None, r=None, t=None, images=None, is_encoded=False, train=True):
         """
         Forward pass of DiT.
-        state: [..., obs_dim],
-        obss: (somthing)
+        observations: [..., obs_dim],
+        images: (somthing)
         actions: [..., act_dim]
         r: Additional timestep (optional)
         t: Diffusion timestep (optional)
@@ -554,29 +555,35 @@ class MFDiT_REAL(nn.Module):
         train: Whether in training mode
         """
         
-        if observations is not None and self.encoders is not None:
-            obs_encoded = []
-            for i, obs in enumerate(observations):
-                obs_encoded.append(self.encoders[i](obs)) # B, ?
-            obs_inputs = jnp.stack(obs_encoded, axis=1) # B, N_obs, ?
-            obs_embedder = FeatureEmbed(input_dim=obs_inputs.shape[-1], embed_dim=self.hidden_dim)    
-            obs_embed = obs_embedder(obs_inputs) # B, N_obs, ? -> B, N_obs, H
+        if images is not None and self.encoders is not None:
+            imgs_encoded = []
+            for i, imgs in enumerate(images):
+                imgs_encoded.append(self.encoders[i](imgs)) # B, ?
+            imgs_inputs = jnp.stack(imgs_encoded, axis=1) # B, N_obs, ?
+            imgs_embedder = FeatureEmbed(input_dim=imgs_inputs.shape[-1], embed_dim=self.hidden_dim)    
+            imgs_embed = imgs_embedder(imgs_inputs) # B, N_obs, ? -> B, N_obs, H
         else:
-            obs_embedder = None
-            obs_embed = None
+            imgs_embedder = None
+            imgs_embed = None
                     
         # Combine obs and action
-        state_embedder = FeatureEmbed(input_dim=state.shape[-1], embed_dim=self.hidden_dim)
-        state_embed = state_embedder(state) # B, ? -> B, 1, H
+        obs_embedder = FeatureEmbed(input_dim=observations.shape[-1], embed_dim=self.hidden_dim)
+        obs_embed = obs_embedder(observations) # B, ? -> B, 1, H
 
-        noise_embedder = FeatureEmbed(input_dim=self.output_dim.shape[-1], embed_dim=self.hidden_dim)
-        noise = noise.reshape(-1, self.output_len, self.output_dim) # B, N_act, A
+        print('obs', obs_embed.shape)
+
+        noise_embedder = FeatureEmbed(input_dim=self.output_dim, embed_dim=self.hidden_dim)
+        noise = actions.reshape(-1, self.output_len, self.output_dim) # B, N_act, A
         noise_embed = noise_embedder(noise) # B, N_act, A -> B, N_act, H
 
-        if obs_embed is not None:
-            x = jnp.concatenate([obs_embed, state_embed, noise_embed]) # B, L, H
+        print('noise', noise_embed.shape)
+
+        if imgs_embed is not None:
+            x = jnp.concatenate([imgs_embed, obs_embed, noise_embed], axis=1) # B, L, H
         else:
-            x = jnp.concatenate([state_embed, noise_embed]) # B, L, H
+            x = jnp.concatenate([obs_embed, noise_embed], axis=1) # B, L, H
+
+        print('total', x.shape)
         
         final_layer = FinalLayer(
             dim=self.hidden_dim,

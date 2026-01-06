@@ -168,11 +168,11 @@ def main(_):
     agent_class = agents[config['agent_name']]
     if config['agent_name'] == 'meanflow_robot':
         agent = agent_class.create(
-            FLAGS.seed,
-            example_batch['observations'],
-            None,
-            example_batch['actions'],
-            config,
+            seed=FLAGS.seed,
+            ex_observations=example_batch['observations'],
+            ex_actions=example_batch['actions'],
+            ex_images=None,
+            config=config,
         )
     else:
         agent = agent_class.create(

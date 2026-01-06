@@ -21,6 +21,7 @@ python main.py \
     --agent.num_critic 2 \
     --agent.latent_dist "$3" \
     --agent.alpha $4 \
+    --seed $6
     # --agent.weight_decay 0.1
 
 # #-task$2-v0 \

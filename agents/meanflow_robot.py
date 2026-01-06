@@ -294,9 +294,9 @@ class MEANFLOWROBOTAgent(flax.struct.PyTreeNode):
     def create(
         cls,
         seed,
-        ex_states,
+        ex_observations,
         ex_actions,
-        ex_observations=None,
+        ex_images=None,
         config=None,
     ):
         """Create a new agent.
@@ -310,8 +310,8 @@ class MEANFLOWROBOTAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ex_times = ex_states[..., :1]
-        ob_dims = ex_states.shape[-1:]
+        ex_times = ex_observations[..., :1]
+        ob_dims = ex_observations.shape[-1:]
         action_dim = ex_actions.shape[-1]
         action_len = ex_actions.shape[1]
         
@@ -322,10 +322,10 @@ class MEANFLOWROBOTAgent(flax.struct.PyTreeNode):
         
         full_action_dim = full_actions.shape[-1]
 
-        if ex_observations is not None:
+        if ex_images is not None:
             # Define encoders.
             encoders = dict()
-            for key, obs in ex_observations.items():
+            for key in ex_images.keys():
                 if config['encoder'] is not None:
                     encoder_module = encoder_modules[config['encoder']]
                     encoders[key] = encoder_module()
@@ -336,24 +336,24 @@ class MEANFLOWROBOTAgent(flax.struct.PyTreeNode):
             hidden_dim=256,
             depth=3,
             num_heads=2,
-            num_obs=0,
             output_dim=action_dim,  
             output_len=action_len,
             use_r=True,
-            encoders=(encoders[k] for k in ex_observations.keys())
+            encoders=(encoders[k] for k in ex_observations.keys()) if encoders is not None else None
         )
 
         if config['time_r_zero'] or config['mf_method']=='imf':
-            actor_input_shape = (ex_states, ex_observations, full_actions, ex_times)
+            actor_input_shape = (ex_observations, full_actions, ex_times, ex_images)
         else:
-            actor_input_shape = (ex_states, ex_observations, full_actions, ex_times, ex_times)
+            actor_input_shape = (ex_observations, full_actions, ex_times, ex_times, ex_images)
 
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, actor_input_shape),
         )
 
-        for k, v in encoders.items():
-            network_info[f'{k}_encoder'] = (v, (ex_observations[k],))
+        if encoders is not None:
+            for k, v in encoders.items():
+                network_info[f'{k}_encoder'] = (v, (ex_images[k],))
             
         networks = {k: v[0] for k, v in network_info.items()}
         network_args = {k: v[1] for k, v in network_info.items()}
