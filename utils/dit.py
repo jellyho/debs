@@ -263,7 +263,7 @@ class FDiT(nn.Module):
         self.pos_embed = self.param(
             'pos_embed',
             nn.initializers.normal(stddev=0.005), 
-            (1, 1, self.hidden_dim)
+            (1, self.hidden_dim)
         )
         
         # Transformer blocks
@@ -315,7 +315,7 @@ class FDiT(nn.Module):
         """
         if not is_encoded and self.encoder is not None:
             observations = self.encoder(observations)
-            
+
         # Combine obs and action
         x_in = jnp.concatenate([observations, actions], axis=-1)
         
@@ -332,7 +332,11 @@ class FDiT(nn.Module):
             final_layer = self.final_layer
 
         # Embed
-        x = embedder(x_in) + self.pos_embed  # shape: [B, 1, H]
+        x = embedder(x_in)
+
+        if len(x.shape) == 3:
+            pos_embed = jnp.expand_dims(self.pos_embed, axis=0)  # shape: [B, 1, H]
+        x = x + pos_embed
         
         # Dual timestep embedding (keeping this unique feature)
         if t is not None:
@@ -353,11 +357,7 @@ class FDiT(nn.Module):
         
         # Collapse sequence dimension
 
-        if len(x.shape) == 3:
-            x = x[:, 0, :]
-        else:
-            x = x[0, :]
-
+        x = x[:, 0, :]
         
         if self.use_output_layernorm:
             x = nn.LayerNorm(epsilon=1e-5)(x)
@@ -493,124 +493,121 @@ class MFDiT(nn.Module):
             x = nn.LayerNorm(epsilon=1e-5)(x)
         
         return x
-
-class AdaResBlock(nn.Module):
-    """
-    Core Block of AdaResFlow.
-    Replaces DiTBlock. No Attention, pure MLP with AdaLN.
-    """
-    dim: int
-    mlp_ratio: float = 4.0
-    act_layer: Callable = nn.silu # SiLU is best for Flow Matching
-    norm_layer: Callable = RMSNorm # Assuming RMSNorm is defined elsewhere
     
-    @nn.compact
-    def __call__(self, x, c):
-        # x: [Batch, Dim]
-        # c: [Batch, Dim] (Condition Vector)
-
-        # 1. Generate Modulation Parameters (Scale, Shift, Gate)
-        # Attention이 없으므로 파라미터 3개 세트(MLP용)만 생성하면 됨
-        adaLN_modulation = nn.Sequential([
-            self.act_layer,
-            nn.Dense(3 * self.dim, kernel_init=nn.initializers.zeros) 
-        ])(c)
-        
-        shift, scale, gate = jnp.split(adaLN_modulation, 3, axis=-1)
-        
-        # 2. Pre-Norm & Modulate (FiLM)
-        norm_x = self.norm_layer(self.dim)(x)
-        mod_x = modulate(norm_x, scale, shift)
-        
-        # 3. MLP Operation
-        # MlpBlock implementation assumed to be standard (Dense -> Act -> Dense)
-        mlp_out = MlpBlock(
-            dim=self.dim,
-            mlp_dim=int(self.dim * self.mlp_ratio)
-        )(mod_x)
-        
-        # 4. Gated Residual Connection
-        x = x + gate * mlp_out
-        
-        return x
-
-# -----------------------------------------------------------------------------
-# Main Architecture: AdaResFlow
-# -----------------------------------------------------------------------------
-
-class AdaResMeanFlowField(nn.Module):
+class MFDiT_REAL(nn.Module):
     """
-    AdaResFlow: Adaptive Residual Flow Network.
-    A specialized architecture for 1D vector Flow Matching (e.g., Robot Actions).
-    
-    Features:
-    - No Self-Attention (Optimized for Seq Len=1)
-    - Dual Conditioning (Timestep t + Return r)
-    - Deep ResNet backbone with AdaLN (FiLM)
+    Diffusion Transformer (DiT) model for 1D vector data.
     """
-    input_dim: int = 0
-    hidden_dim: int = 1024 # DiT-Large equivalent param count without attention overhead
-    depth: int = 24
+    input_dim: int = 0  # Set to 0 to infer from input
+    hidden_dim: int = 1152
+    depth: int = 28
+    num_heads: int = 16
     mlp_ratio: float = 4.0
-    output_dim: int = 0
-    encoder: Optional[nn.Module] = None
-    residual_scale: float = 0.1 # Scale skip connection for deep network stability
-
+    output_dim: int = 0  
+    output_len: int = 5
+    encoders: Optional[Sequence[nn.Module]] = None
+    tanh_squash: bool = False  # Changed from True to False
+    final_fc_init_scale: float = 0.0  # Changed from 1e-4 to 0.0
+    use_output_layernorm: bool = False  # Changed from True to False
+    gradient_clip_norm: float = 1.0
+    residual_scale: float = 0.1
+    use_r: bool = True
+    
     def setup(self):
-        # 1. Dual Embedders
+        # Dual timestep embedders (keeping this unique feature)
         self.t_embedder = TimestepEmbedder(dim=self.hidden_dim)
-        self.r_embedder = TimestepEmbedder(dim=self.hidden_dim)
+        if self.use_r:
+            self.r_embedder = TimestepEmbedder(dim=self.hidden_dim)
         
-        # 2. Input Projection (No Positional Embedding needed for vector data)
-        self.input_proj = nn.Dense(self.hidden_dim, kernel_init=kaiming_normal(scale=0.01))
+        if self.encoders is None:
+            obs_len = 1
+        else:
+            obs_len = len(self.encoders) + 1 # image + state
 
-        # 3. Backbone Blocks
+        # Positional embedding
+        self.pos_embed = self.param(
+            'pos_embed',
+            nn.initializers.normal(stddev=0.005), 
+            (1, obs_len + self.output_len, self.hidden_dim)
+        )
+        
+        # Transformer blocks
         self.blocks = [
-            AdaResBlock(
+            DiTBlock(
                 dim=self.hidden_dim,
+                num_heads=self.num_heads,
                 mlp_ratio=self.mlp_ratio
             )
             for _ in range(self.depth)
         ]
-
-        # 4. Final Layer
-        out_dim = self.output_dim if self.output_dim > 0 else self.input_dim
-        self.final_layer = FinalLayer(
-            dim=self.hidden_dim,
-            out_dim=out_dim
-        )
-
+    
     @nn.compact
-    def __call__(self, observations, actions, t, r=None, is_encoded=False, train=True):
+    def __call__(self, state, observations=None, actions=None, r=None, t=None, is_encoded=False, train=True):
         """
-        Forward pass.
-        All inputs are 2D: [Batch, Dim]. No 3D reshaping.
+        Forward pass of DiT.
+        state: [..., obs_dim],
+        obss: (somthing)
+        actions: [..., act_dim]
+        r: Additional timestep (optional)
+        t: Diffusion timestep (optional)
+        is_encoded: Whether observations are already encoded
+        train: Whether in training mode
         """
-        # 1. Observation Encoding
-        if not is_encoded and self.encoder is not None:
-            observations = self.encoder(observations)
-
-        # 2. Input Setup
-        x_in = jnp.concatenate([observations, actions], axis=-1)
-        x = self.input_proj(x_in) # [B, Hidden]
-
-        # 3. Dual Conditioning Logic (t + r)
-        t_emb = self.t_embedder(t)
         
-        if r is not None:
-            r_emb = self.r_embedder(r)
-            c = t_emb + r_emb # Sum conditioning
+        if observations is not None and self.encoders is not None:
+            obs_encoded = []
+            for i, obs in enumerate(observations):
+                obs_encoded.append(self.encoders[i](obs)) # B, ?
+            obs_inputs = jnp.stack(obs_encoded, axis=1) # B, N_obs, ?
+            obs_embedder = FeatureEmbed(input_dim=obs_inputs.shape[-1], embed_dim=self.hidden_dim)    
+            obs_embed = obs_embedder(obs_inputs) # B, N_obs, ? -> B, N_obs, H
         else:
-            c = t_emb
+            obs_embedder = None
+            obs_embed = None
+                    
+        # Combine obs and action
+        state_embedder = FeatureEmbed(input_dim=state.shape[-1], embed_dim=self.hidden_dim)
+        state_embed = state_embedder(state) # B, ? -> B, 1, H
 
-        # 4. Deep Residual Backbone
+        noise_embedder = FeatureEmbed(input_dim=self.output_dim.shape[-1], embed_dim=self.hidden_dim)
+        noise = noise.reshape(-1, self.output_len, self.output_dim) # B, N_act, A
+        noise_embed = noise_embedder(noise) # B, N_act, A -> B, N_act, H
+
+        if obs_embed is not None:
+            x = jnp.concatenate([obs_embed, state_embed, noise_embed]) # B, L, H
+        else:
+            x = jnp.concatenate([state_embed, noise_embed]) # B, L, H
+        
+        final_layer = FinalLayer(
+            dim=self.hidden_dim,
+            out_dim=self.output_dim,
+            init_scale=self.final_fc_init_scale
+        )
+        # Dynamically create embedder and final layer if needed
+
+        # Embed
+        x = x + self.pos_embed  # shape: [B, L, H]
+        
+        # Dual timestep embedding (keeping this unique feature)
+        if self.use_r:
+            t_emb = self.t_embedder(t)
+            r_emb = self.r_embedder(r)
+            c = t_emb + r_emb
+        else:
+            # Fallback to single timestep if only t is provided
+            t_emb = self.t_embedder(t)
+            c = t_emb        
+        # Transformer blocks with unified residual mix (like MFDiT_SIM)
         for block in self.blocks:
             x_res = x
-            x = block(x, c=c)
-            # Scaled Residual for stability
+            x = block(x, c=c, deterministic=not train)
             x = x_res + self.residual_scale * (x - x_res)
 
-        # 5. Final Projection
-        x = self.final_layer(x, c=c)
-
+        # Final projection
+        x = final_layer(x, c=c) # B, L, A
+        
+        # Collapse sequence dimension
+        x = x[:, -self.output_len:, :] #B, N_Act, A
+        x = x.reshape(-1, self.output_len * self.output_dim)
+        
         return x

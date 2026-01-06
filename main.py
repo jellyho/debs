@@ -154,25 +154,10 @@ def main(_):
         dataset.nstep = 1
         dataset.discount = FLAGS.discount
         dataset.discount2 = FLAGS.discount
-        # dataset.discount2 = config['discount']
-        # dataset.normalize_rewards = FLAGS.normalize_rewards
-        # dataset.additional_normalize_rewards = FLAGS.additional_normalize_rewards
-        # dataset.additional_normalize_rewards_scale = FLAGS.additional_normalize_rewards_scale
-        # if config['agent_name'] == 'rebrac' or config['agent_name'] == 'sarsa_fql':
-        #     dataset.return_next_actions = True
-        # if 'bandit' in FLAGS.env_name:
-        #     dataset.v_max = 1
-        #     dataset.v_min = 0
-        # elif 'singletask' in FLAGS.env_name:
-        #     dataset.v_min = 1 / (1 - dataset.discount) * dataset['rewards'].min().item()
-        #     dataset.v_max = 0
         return dataset
     
     train_dataset = process_train_dataset(train_dataset)
     example_batch = train_dataset.sample(config['batch_size'])
-
-    # config['v_min'] = train_dataset.v_min
-    # config['v_max'] = train_dataset.v_max
 
     for k, v in example_batch.items():
         try:
@@ -181,12 +166,21 @@ def main(_):
             pass
 
     agent_class = agents[config['agent_name']]
-    agent = agent_class.create(
-        FLAGS.seed,
-        example_batch['observations'],
-        example_batch['actions'],
-        config,
-    )
+    if config['agent_name'] == 'meanflow_robot':
+        agent = agent_class.create(
+            FLAGS.seed,
+            example_batch['observations'],
+            None,
+            example_batch['actions'],
+            config,
+        )
+    else:
+        agent = agent_class.create(
+            FLAGS.seed,
+            example_batch['observations'],
+            example_batch['actions'],
+            config,
+        )
 
     if config['agent_name'] == 'meanflow':
         agent.print_param_stats()

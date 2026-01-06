@@ -121,7 +121,7 @@ class FLOWAgent(flax.struct.PyTreeNode):
     ):
         rng, x_rng = jax.random.split(rng, 2)
         latent_dim = self.config["horizon_length"] * self.config["action_dim"]
-        e = self.sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim))
+        e = self.sample_latent_dist(x_rng, (*observations.shape[:-1], latent_dim))
         actions = self.compute_flow_actions(observations, e)
         actions = jnp.reshape(
             actions, 
@@ -141,13 +141,11 @@ class FLOWAgent(flax.struct.PyTreeNode):
             observations = self.network.select('actor_bc_flow_encoder')(observations)
 
         actions = noises
-        print(actions.shape)
         # Euler method.
         for i in range(self.config['flow_steps']):
             t = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps'])
-            vels = self.network.select('actor_bc_flow')(observations, actions, t, is_encoded=True)
-            print(actions.shape, vels.shape)
-            actions = actions + vels / self.config['flow_steps']
+            vels = self.network.select('actor_bc_flow')(observations, actions, t, is_encoded=True).reshape(actions.shape)
+            actions = actions + jnp.reshape(vels, actions.shape) / self.config['flow_steps']
         actions = jnp.clip(actions, -1, 1)
         return actions
 
