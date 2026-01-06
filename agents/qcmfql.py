@@ -23,60 +23,38 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         # Q(s, a) <- R + \gamma V(s')
         batch_size = batch['actions'].shape[0]
 
-        if self.config['rl_method'] == 'iql':
-            next_v = self.network.select(f'value')(
-                batch['next_observations']
-            )
+        rng, sample_rng = jax.random.split(rng, 2)
+        # onestep generation
+        next_actions = self.sample_actions(batch['next_observations'], rng=sample_rng)
 
-            target_v = batch['rewards'] + \
-                (self.config['discount'] ** self.config["horizon_length"]) * \
-                batch['masks'] * next_v
+        next_qs = self.network.select('target_critic')(
+            batch['next_observations'], 
+            actions=next_actions.reshape(batch_size, -1)
+        )
 
-            qs = self.network.select('critic')(
-                batch['observations'],
-                actions=batch['actions'].reshape(batch_size, -1),
-                params=grad_params
-            ) # N, B, 1
-
-            critic_loss = jnp.square(
-                jnp.broadcast_to(target_v, qs.shape) - qs
-            ).mean()
-
-            q = qs.mean(axis=0) # For logging
-
-        elif self.config['rl_method'] == 'ddpg':
-            rng, sample_rng = jax.random.split(rng, 2)
-            # onestep generation
-            next_actions = self.sample_actions(batch['next_observations'], rng=sample_rng)
-
-            next_qs = self.network.select('target_critic')(
-                batch['next_observations'], 
-                actions=next_actions.reshape(batch_size, -1)
-            )
-
-            if self.config['num_critic'] > 1:
-                if self.config['critic_agg'] == 'min':
-                    next_q = jnp.min(next_qs, axis=0)
-                else:
-                    next_q = jnp.mean(next_qs, axis=0)
+        if self.config['num_critic'] > 1:
+            if self.config['critic_agg'] == 'min':
+                next_q = jnp.min(next_qs, axis=0)
             else:
-                next_q = next_qs
-            
-            qs = self.network.select('critic')(
-                batch['observations'], 
-                actions=batch['actions'].reshape(batch_size, -1),
-                params=grad_params
-            )
+                next_q = jnp.mean(next_qs, axis=0)
+        else:
+            next_q = next_qs
+        
+        qs = self.network.select('critic')(
+            batch['observations'], 
+            actions=batch['actions'].reshape(batch_size, -1),
+            params=grad_params
+        )
 
-            target_q = batch['rewards'] + \
-                (self.config['discount'] ** self.config["horizon_length"]) * \
-            batch['masks'] * next_q
+        target_q = batch['rewards'] + \
+            (self.config['discount'] ** self.config["horizon_length"]) * \
+        batch['masks'] * next_q
 
-            critic_loss = jnp.square(
-                qs - jnp.broadcast_to(target_q, qs.shape)
-            ).mean()
+        critic_loss = jnp.square(
+            qs - jnp.broadcast_to(target_q, qs.shape)
+        ).mean()
 
-            q = qs.mean(axis=0) # For logging
+        q = qs.mean(axis=0) # For logging
 
         return critic_loss, {
             'critic_loss': critic_loss,
@@ -84,41 +62,6 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
             'q_max': q.max(),
             'q_min': q.min(),
         }
-
-    def value_loss(self, batch, grad_params, rng):
-        # Only applied when IQL
-        batch_size = batch['actions'].shape[0]
-
-        qs = self.network.select('target_critic')(
-            batch['observations'],
-            actions=batch['actions'].reshape(batch_size, -1),
-        ) # N, B
-
-        if self.config['num_critic'] > 1:
-            if self.config['critic_agg'] == 'min':
-                q = jnp.min(qs, axis=0)
-            else:
-                q = jnp.mean(qs, axis=0)
-        else:
-            q = qs
-
-        v = self.network.select('value')(
-            batch['observations'],
-            params=grad_params
-        ) # B
-        g = jnp.where(q >= v, self.config['expectile_tau'], 1.0 - self.config['expectile_tau'])
-        value_loss = (g * jnp.square(q - v)).mean()
-
-        metrics = {
-            # losses
-            'value_loss': value_loss,
-            # value stats
-            'v_mean': v.mean(),
-            'v_max': v.max(),
-            'v_min': v.min(),
-            'q_target_hist': q,
-        }
-        return value_loss, metrics
 
     ## MF utils
     def adaptive_l2_loss(self, batch_size, error, p=0.5, c=1e-3):
@@ -190,23 +133,15 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
                 params=grad_params
             )
 
-        if self.config['mf_method'] == 'mf':
-            u, dudt = jax.jvp(
-                mean_flow_forward, 
-                (z, t, r), 
-                (v, jnp.ones_like(t), jnp.zeros_like(r))
-            )
-            u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
-            u_tgt = jax.lax.stop_gradient(u_tgt)
-        elif self.config['mf_method'] == 'jit_mf':
-            x_pred, dxdt = jax.jvp(
-                mean_flow_forward, 
-                (z, t, r), 
-                (v, jnp.ones_like(t), jnp.zeros_like(r))
-            )
-            u, dudt = z - x_pred, v - dxdt
-            u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
-            u_tgt = jax.lax.stop_gradient(u_tgt)
+
+        x_pred, dxdt = jax.jvp(
+            mean_flow_forward, 
+            (z, t, r), 
+            (v, jnp.ones_like(t), jnp.zeros_like(r))
+        )
+        u, dudt = z - x_pred, v - dxdt
+        u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
+        u_tgt = jax.lax.stop_gradient(u_tgt)
 
         loss = self.adaptive_l2_loss(batch_size, u - u_tgt)
 
@@ -222,9 +157,6 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
             e = jax.random.normal(x_rng, sample_shape)
         elif self.config['latent_dist'] == 'uniform':
             e = jax.random.uniform(x_rng, sample_shape, minval=-1.0, maxval=1.0)
-        elif self.config['latent_dist'] == 'simplex':
-            e = -jnp.log(jax.random.uniform(x_rng, sample_shape)) # Exponential
-            e = e / jnp.sum(e, axis=-1, keepdims=True) # Sum = 1
         elif self.config['latent_dist'] == 'sphere':
             e = jax.random.normal(x_rng, sample_shape)
             sq_sum = jnp.sum(jnp.square(e), axis=-1, keepdims=True)
@@ -234,10 +166,8 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
 
     def onestep_actor_loss(self, batch, grad_params, rng):
         observations = batch['observations']
-        actions_gt = batch['actions'] # Dataset Actions (Ground Truth)
         batch_size = observations.shape[0]
         latent_dim = self.config['action_dim'] * self.config['horizon_length']
-        actions_gt_flat = jnp.reshape(actions_gt, (batch_size, latent_dim))      
         
         ### Query latent actor
         rng, x_rng, l_rng = jax.random.split(rng, 3)
@@ -281,19 +211,6 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         return loss, info_dict
 
     @jax.jit
-    def total_onestep_actor_loss(self, batch, grad_params, rng=None):
-        info = {}
-        rng = rng if rng is not None else self.rng
-
-        rng, actor_rng = jax.random.split(rng, 2)
-
-        actor_loss, actor_info = self.onestep_actor_loss(batch, grad_params, actor_rng)
-        for k, v in actor_info.items():
-            info[f'onestpe/{k}'] = v
-
-        return actor_loss, info
-
-    @jax.jit
     def total_loss(self, batch, grad_params, rng=None):
         """Compute the total loss."""
         info = {}
@@ -307,12 +224,6 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         loss += critic_loss
         for k, v in critic_info.items():
             info[f'critic/{k}'] = v
-
-        if self.config['rl_method'] == 'iql':
-            value_loss, value_info = self.value_loss(batch, grad_params, value_rng)
-            for k, v in value_info.items():
-                info[f'value/{k}'] = v
-            loss += value_loss
 
         actor_loss, actor_info = self.actor_loss(batch, grad_params, actor_rng)
         loss += actor_loss
@@ -347,20 +258,6 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         agent.target_update(new_network, 'critic')
         return agent.replace(network=new_network, rng=new_rng), info
 
-    @staticmethod
-    def _onestep_actor_update(agent, batch):
-        """Update the agent and return a new agent with information dictionary."""
-        new_rng, rng = jax.random.split(agent.rng)
-
-        def loss_fn(grad_params):
-            return agent.total_onestep_actor_loss(batch, grad_params, rng=rng)
-        new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
-        return agent.replace(network=new_network, rng=new_rng), info
-
-    @jax.jit
-    def onestep_actor_update(self, batch):
-        return self._onestep_actor_update(self, batch)
-
     @jax.jit
     def update(self, batch):
         return self._update(self, batch)
@@ -378,10 +275,7 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         observations,
         rng=None,
     ):
-        if self.config['rl_method'] == 'iql':
-            return self.network.select('value')(observations)
-        else:
-            return jnp.zeros_like(observations)
+        return jnp.zeros_like(observations)
     
     @jax.jit
     def sample_actions(
@@ -429,10 +323,8 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
             t, 
             t - r
         )
-        if self.config['mf_method'] == 'jit_mf':
-            action = output
-        elif self.config['mf_method'] == 'mf':
-            action = noise - output
+        
+        action = output
         action = jnp.clip(action, -1, 1)
         return action
 
@@ -474,14 +366,6 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
             encoders['value'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()
 
-        # Define networks.
-        if config['rl_method'] == 'iql':
-            value_def = Value(
-                hidden_dims=config['value_hidden_dims'],
-                layer_norm=config['layer_norm'],
-                encoder=encoders.get('value')
-            )
-
         critic_def = Value(
             hidden_dims=config['critic_hidden_dims'],
             layer_norm=config['layer_norm'],
@@ -510,9 +394,6 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
             critic=(critic_def, (ex_observations, full_actions)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations, full_actions)),
         )
-
-        if config['rl_method'] == 'iql':
-            network_info['value'] = value_def, (ex_observations)
 
         if encoders.get('actor_bc_flow') is not None:
             network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
@@ -548,7 +429,6 @@ def get_config():
             lr=3e-4,  # Learning rate.
             batch_size=256,  # Batch size.
             actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
-            value_hidden_dims=(128, 128, 128, 128),  # Value network hidden dimensions.
             critic_hidden_dims=(256, 256, 256, 256),  # Value network hidden dimensions.
             layer_norm=True,  # Whether to use layer normalization.
             actor_layer_norm=False,  # Whether to use layer normalization for the actor.
@@ -561,15 +441,8 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
-            rl_method='iql', # DDPG, IQL
-            expectile_tau=0.9,
-            flow_ratio=0.25,
-            mf_method='jit_mf',
-            late_update=False,
             latent_dist='uniform',
-            alpha=1.0,
-            extract_method='awr', # 'ddpg', 'awr',,
-            noisy_latent_actor=False
+            alpha=1.0
         )
     )
     return config

@@ -22,21 +22,13 @@ class FLOWAgent(flax.struct.PyTreeNode):
     def sample_latent_dist(self, x_rng, sample_shape):
         if self.config['latent_dist'] == 'normal':
             e = jax.random.normal(x_rng, sample_shape)
-        elif self.config['latent_dist'] == 'truncated_normal':
-            e = jax.random.truncated_normal(x_rng, sample_shape)
         elif self.config['latent_dist'] == 'uniform':
             e = jax.random.uniform(x_rng, sample_shape, minval=-1.0, maxval=1.0)
-        elif self.config['latent_dist'] == 'simplex':
-            e = -jnp.log(jax.random.uniform(x_rng, sample_shape)) # Exponential
-            e = e / jnp.sum(e, axis=-1, keepdims=True) # Sum = 1
         elif self.config['latent_dist'] == 'sphere':
             e = jax.random.normal(x_rng, sample_shape)
             sq_sum = jnp.sum(jnp.square(e), axis=-1, keepdims=True)
             norm = jnp.sqrt(sq_sum + 1e-6)
             e = e / norm * jnp.sqrt(sample_shape[-1])
-        elif self.config['latent_dist'] == 'beta':
-            e = jax.random.beta(x_rng, 2.0, 2.0, sample_shape)
-            e = e * 2.0 - 1.0
         return e
 
     def actor_loss(self, batch, grad_params, rng):
@@ -189,7 +181,7 @@ class FLOWAgent(flax.struct.PyTreeNode):
 
         if config['use_DiT']:
             actor_bc_flow_def = FDiT(
-                hidden_dim=256,
+                hidden_dim=config['actor_hidden_dims'][0],
                 depth=3,
                 num_heads=2,
                 output_dim=full_action_dim,  
@@ -243,13 +235,10 @@ def get_config():
             lr=3e-4,  # Learning rate.
             batch_size=256,  # Batch size.
             actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
-            value_hidden_dims=(512, 512, 512, 512),  # Value network hidden dimensions.
-            layer_norm=True,  # Whether to use layer normalization.
             actor_layer_norm=False,  # Whether to use layer normalization for the actor.
             discount=0.99,  # Discount factor.
             tau=0.005,  # Target network update rate.
             critic_agg='mean',  # Aggregation method for target Q values.
-            alpha=1.0,  # BC coefficient (need to be tuned for each environment).
             num_critic=2, # critic ensemble size
             flow_steps=10,  # Number of flow steps.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
@@ -257,13 +246,7 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
-            rl_method='iql', # DDPG, IQL
-            expectile_tau=0.9,
-            flow_ratio=0.25,
-            mf_method='jit_mf',
-            late_update=False,
             latent_dist='normal',
-            extract_method='awr', # 'ddpg', 'awr',,
             use_DiT=False,
         )
     )

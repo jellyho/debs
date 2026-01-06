@@ -28,23 +28,6 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             error: (Batch, Total_Action_Dim) - Flattened error
             valid_mask: (Batch,)
         """
-        ## THIS SHOULD BE modified so support horizion
-        # 1. Sample별 Error 계산 (Sum of Squared Error)
-        # Action Dim축으로 합침
-        # delta_sq = jnp.mean(jnp.square(error), axis=-1)
-        # delta_sq = jnp.maximum(delta_sq, 1e-12)
-        
-        # # 2. Adaptive Weight 계산 (Gradient 흐르지 않게 stop_gradient)
-        # # p = 1 - gamma (공식 코드 norm_p=1.0과 유사)
-        # w = jnp.power(delta_sq + c, p)
-        # w = jnp.maximum(w, 1e-12)
-        # w = 1.0 / w
-        # w = jnp.clip(w, 1e-6, 1e6)
-        # w = jax.lax.stop_gradient(w)
-        # # 3. Weighted Loss 계산
-        # # loss = w * ||u - u_tgt||^2
-        # loss = w * delta_sq
-
         # error: (B, ...)
         if error.ndim == 1:
             delta_sq = error ** 2  # (B,)
@@ -443,7 +426,7 @@ def get_config():
             weight_decay=0.,
             rl_method='iql', # DDPG, IQL
             expectile_tau=0.9,
-            flow_ratio=0.50,
+            flow_ratio=0.25,
             mf_method='jit_mf',
             late_update=False,
             latent_dist='normal',

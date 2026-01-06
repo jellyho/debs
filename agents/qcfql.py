@@ -63,9 +63,6 @@ class QCFQLAgent(flax.struct.PyTreeNode):
             e = jax.random.normal(x_rng, sample_shape)
         elif self.config['latent_dist'] == 'uniform':
             e = jax.random.uniform(x_rng, sample_shape, minval=-1.0, maxval=1.0)
-        elif self.config['latent_dist'] == 'simplex':
-            e = -jnp.log(jax.random.uniform(x_rng, sample_shape)) # Exponential
-            e = e / jnp.sum(e, axis=-1, keepdims=True) # Sum = 1
         elif self.config['latent_dist'] == 'sphere':
             e = jax.random.normal(x_rng, sample_shape)
             sq_sum = jnp.sum(jnp.square(e), axis=-1, keepdims=True)
@@ -338,23 +335,12 @@ def get_config():
             alpha=1.0,  # BC coefficient (need to be tuned for each environment).
             num_critic=2, # critic ensemble size
             flow_steps=10,  # Number of flow steps.
-            normalize_q_loss=False,  # Whether to normalize the Q loss.
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
             horizon_length=ml_collections.config_dict.placeholder(int), # will be set
-            action_chunking=True,  # False means n-step return
-            actor_type="distill-ddpg",
-            actor_num_samples=32,  # for actor_type="best-of-n" only
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
-            rl_method='iql', # DDPG, IQL
-            expectile_tau=0.9,
-            flow_ratio=0.25,
-            mf_method='jit_mf',
-            late_update=False,
             latent_dist='uniform',
-            extract_method='awr', # 'ddpg', 'awr',,
-            noisy_latent_actor=False
         )
     )
     return config
