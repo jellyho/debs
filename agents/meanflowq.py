@@ -127,12 +127,15 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
                 params=grad_params # <--- Gradients flow here
             )
         else:
-            rng, l_rng = jax.random.split(rng, 2)
+            rng, l_rng, e_rng = jax.random.split(rng, 3)
             z_pred = self.network.select('latent_actor')(
                 observations, 
                 rng=l_rng,
                 params=grad_params # <--- Gradients flow here
             )
+            e = sample_latent_dist(x_rng, (batch_size, latent_dim), 'normal')
+            z_pred = z_pred + 0.1 * e  # add small noise for better exploration
+
 
         if self.config['extract_method'] in ['onestep_ddpg']:
             x_pred = self.compute_flow_actions(observations, e)
