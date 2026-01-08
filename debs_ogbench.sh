@@ -14,6 +14,7 @@ python main.py \
     --eval_interval 100000 \
     --eval_episodes 50 \
     --video_episodes 10 \
+    --agent.extract_method "ddpg" \
     --offline_steps 1000000 \
     --save_dir "exp/" \
     --agent.num_critic 2 \
