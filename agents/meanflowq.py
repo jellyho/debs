@@ -11,6 +11,7 @@ from agents.meanflow_utils import adaptive_l2_loss, sample_t_r, sample_latent_di
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorMeanFlowField, Value, ActorVectorField
+from utils.dit import MFDiT_REAL
 
 class MEANFLOWQAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
@@ -328,6 +329,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         ex_times = ex_observations[..., :1]
         ob_dims = ex_observations.shape[-1:]
         action_dim = ex_actions.shape[-1]
+        action_len = ex_actions.shape[1]
         
         full_actions = jnp.reshape(
             ex_actions,
@@ -350,12 +352,23 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             encoder=encoders.get('critic'),
         )
 
-        actor_bc_flow_def = ActorMeanFlowField(
-            hidden_dims=config['actor_hidden_dims'],
-            action_dim=full_action_dim,
-            layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_bc_flow'),
-        )
+        if config['use_DiT']:
+            actor_bc_flow_def = MFDiT_REAL(
+                hidden_dim=128,
+                depth=3,
+                num_heads=2,
+                output_dim=action_dim,  
+                output_len=action_len,
+                use_r=True,
+                encoders=None,
+            )
+        else:
+            actor_bc_flow_def = ActorMeanFlowField(
+                hidden_dims=config['actor_hidden_dims'],
+                action_dim=full_action_dim,
+                layer_norm=config['actor_layer_norm'],
+                encoder=encoders.get('actor_bc_flow'),
+            )
 
         latent_actor_def = ActorVectorField(
             hidden_dims=config['latent_actor_hidden_dims'],
@@ -428,7 +441,8 @@ def get_config():
             flow_ratio=0.25,
             latent_dist='sphere',
             extract_method='ddpg', # 'ddpg', 'awr',,
-            alpha=1.0
+            alpha=1.0,
+            use_DiT=False
         )
     )
     return config

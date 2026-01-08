@@ -19,7 +19,6 @@ python main.py \
     --agent.num_critic 2 \
     --agent.latent_dist "$3" \
     --seed 100 \
-    --agent.extract_method "onestep_ddpg"
     # --agent.use_DiT
     # --agent.time_dist "$6" \
     # --agent.alpha $4 \
