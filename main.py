@@ -154,7 +154,7 @@ def main(_):
         dataset.nstep = 1
         dataset.discount = FLAGS.discount
         dataset.discount2 = FLAGS.discount
-        dataset.FLAGS.p_aug
+        dataset.p_aug = FLAGS.p_aug
         return dataset
     
     train_dataset = process_train_dataset(train_dataset)
