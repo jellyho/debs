@@ -33,68 +33,6 @@ def batched_random_crop(imgs, crop_froms, padding):
     """Batched version of random_crop."""
     return jax.vmap(random_crop, (0, 0, None))(imgs, crop_froms, padding)
 
-
-def compute_rtg_single_gamma(rewards, terminals, discount):
-    rtg = np.zeros_like(rewards)
-    rtg[-1] = rewards[-1]
-    for i in range(len(rewards) - 2, -1, -1):
-        rtg[i] = rewards[i] + discount * rtg[i + 1] * (1 - terminals[i])
-    return rtg
-
-
-def compute_rtg_two_gamma_packed(rewards, terminals, gamma1, gamma2, L):
-    rewards = np.asarray(rewards, dtype=float)
-    terminals = np.asarray(terminals, dtype=bool)
-    T = len(rewards)
-
-    G = np.zeros(T, dtype=float)
-
-    # Pre-compute gamma1 powers
-    gamma1_powers = gamma1 ** np.arange(L)
-
-    # Find all terminal indices
-    terminal_indices = np.where(terminals)[0]
-
-    # Process each episode separately
-    episode_start = 0
-    for episode_end in tqdm(terminal_indices):
-        # Process each timestep in the episode
-        for t in range(episode_start, episode_end + 1):
-            G_t = 0.0
-            elapsed = 0
-            idx = t
-
-            while idx <= episode_end:
-                # Calculate block size
-                block_end = min(idx + L, episode_end + 1)
-                d = block_end - idx
-
-                # Compute discounted rewards for block
-                g1 = gamma1_powers[:d]
-                R_block = np.dot(g1, rewards[idx:block_end])
-                G_t += (gamma2**elapsed) * R_block
-
-                # Move to next block
-                idx = block_end
-                elapsed += d
-
-                if idx > episode_end:
-                    break
-
-            G[t] = G_t
-
-        episode_start = episode_end + 1
-
-    return G
-
-
-def compute_rtg(rewards, terminals, gamma1, gamma2, L):
-    if gamma1 != gamma2:
-        return compute_rtg_two_gamma_packed(rewards, terminals, gamma1, gamma2, L)
-    else:
-        return compute_rtg_single_gamma(rewards, terminals, gamma1)
-
-
 class Dataset(FrozenDict):
     """Dataset class."""
 
@@ -118,9 +56,6 @@ class Dataset(FrozenDict):
         self.frame_stack = None  # Number of frames to stack; set outside the class.
         self.p_aug = None  # Image augmentation probability; set outside the class.
         self.return_next_actions = False  # Whether to additionally return next actions; set outside the class.
-        self.normalize_rewards = False  # Whether to normalize rewards; set outside the class.
-        self.additional_normalize_rewards = False  # Whether to normalize rewards accorinding to the action sequence.
-        self.additional_normalize_rewards_scale = 1.0  # Scale for additional normalization of rewards.
         self.brc_normalize_rewards = False  # Whether to normalize rewards according to brc paper.
         self.v_max = None  # Maximum value of the reward; set outside the class.
         self.actor_action_sequence = 1  # Actor action sequence; set outside the class. Used for outputting action sequence.
@@ -137,12 +72,6 @@ class Dataset(FrozenDict):
         self._raw_rtgs = None
         self._valid_indices = None
         self._stats = None
-
-    @property
-    def raw_rtgs(self):
-        if self._raw_rtgs is None:
-            self._raw_rtgs = compute_rtg(self['rewards'], self['terminals'], self.discount, self.discount2, self.nstep)
-        return self._raw_rtgs
 
     @property
     def valid_indices(self):

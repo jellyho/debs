@@ -11,7 +11,7 @@ from agents.meanflow_utils import adaptive_l2_loss, sample_t_r, sample_latent_di
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorMeanFlowField
-from utils.dit import MFDiT
+from utils.dit import MFDiT_REAL
 
 class MEANFLOWAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
@@ -33,6 +33,7 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         ##### It does not need to be normal distirbution
         e = sample_latent_dist(x_rng, (batch_size, action_dim), self.config['latent_dist'])
         z = (1 - t) * x + t * e
+        v = e - x
 
         def mean_flow_forward(z, t, r):
             # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
@@ -44,16 +45,38 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
                 params=grad_params
             )
 
-        v = e - x
-        x_pred, dxdt = jax.jvp(
+        
+        # x_pred, dxdt = jax.jvp(
+        #     mean_flow_forward, 
+        #     (z, t, r), 
+        #     (v, jnp.ones_like(t), jnp.zeros_like(r))
+        # )
+        # u, dudt = z - x_pred, v - dxdt
+        # u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
+        # u_tgt = jax.lax.stop_gradient(u_tgt)
+        # err = u - u_tgt
+
+        # v_pred = mean_flow_forward(z, t, t)
+
+        # g_pred, dgdt = jax.jvp(
+        #     mean_flow_forward, 
+        #     (z, t, r), 
+        #     (v_pred, jnp.ones_like(t), jnp.zeros_like(r))
+        # )
+
+        # V = u + (t - r) * jax.lax.stop_gradient(dgdt)
+
+        r = jnp.zeros_like(t)
+
+        g_pred, dgdt = jax.jvp(
             mean_flow_forward, 
             (z, t, r), 
             (v, jnp.ones_like(t), jnp.zeros_like(r))
         )
-        u, dudt = z - x_pred, v - dxdt
-        u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
-        u_tgt = jax.lax.stop_gradient(u_tgt)
-        err = u - u_tgt
+        g_tgt = z + (t - r - 1) * v - (t - r) * dgdt
+        g_tgt = jax.lax.stop_gradient(g_tgt)
+        g_tgt = jnp.clip(g_tgt, -5.0, 5.0)
+        err = g_pred - g_tgt
 
         loss = adaptive_l2_loss(err)
 
@@ -177,6 +200,7 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         ex_times = ex_observations[..., :1]
         ob_dims = ex_observations.shape[-1:]
         action_dim = ex_actions.shape[-1]
+        action_len = ex_actions.shape[1]
         
         full_actions = jnp.reshape(
             ex_actions,
@@ -192,12 +216,14 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             encoders['actor_bc_flow'] = encoder_module()
 
         if config['use_DiT']:
-            actor_bc_flow_def = MFDiT(
-                hidden_dim=256,
+            actor_bc_flow_def = MFDiT_REAL(
+                hidden_dim=128,
                 depth=3,
                 num_heads=2,
-                output_dim=full_action_dim,  
-                encoder=encoders.get('actor_bc_flow'),
+                output_dim=action_dim,  
+                output_len=action_len,
+                use_r=True,
+                encoders=None,
             )
         else:
             actor_bc_flow_def = ActorMeanFlowField(
@@ -297,7 +323,6 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
-            rl_method='iql', # DDPG, IQL
             flow_ratio=0.25,
             latent_dist='normal',
             use_DiT=False,

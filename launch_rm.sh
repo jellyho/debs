@@ -4,8 +4,8 @@
 export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_A6000,gigabyte_A6000,gigabyte_A5000'
 export QOS='big_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="LQL_RM_chunk1"
-export MODEL="meanflowq"
+export JOBNAME="LQL_RM_chunk5_DiT_clip_mfql_rzero"
+export MODEL="meanflow"
 
 
 for latent in "sphere"; do

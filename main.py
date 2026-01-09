@@ -38,6 +38,7 @@ flags.DEFINE_integer('start_training', 5000, 'when does training start')
 flags.DEFINE_integer('utd_ratio', 1, "update to data ratio")
 
 flags.DEFINE_float('discount', 0.99, 'discount factor')
+flags.DEFINE_float('p_aug', 0.5, 'aug prob')
 
 flags.DEFINE_integer('eval_episodes', 50, 'Number of evaluation episodes.')
 flags.DEFINE_integer('video_episodes', 0, 'Number of video episodes for each task.')
@@ -153,6 +154,7 @@ def main(_):
         dataset.nstep = 1
         dataset.discount = FLAGS.discount
         dataset.discount2 = FLAGS.discount
+        dataset.FLAGS.p_aug
         return dataset
     
     train_dataset = process_train_dataset(train_dataset)

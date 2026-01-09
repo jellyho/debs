@@ -90,25 +90,30 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
                 params=grad_params
             )
 
-        v = e - x
+        # x_pred, dxdt = jax.jvp(
+        #     mean_flow_forward, 
+        #     (z, t, r), 
+        #     (v, jnp.ones_like(t), jnp.zeros_like(r))
+        # )
+        # u, dudt = z - x_pred, v - dxdt
+        # u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
+        # u_tgt = jax.lax.stop_gradient(u_tgt)
+        # u_tgt = jnp.clip(u_tgt, -2.0, 2.0)
+        # err = u - u_tgt
 
-        x_pred, dxdt = jax.jvp(
+        g_pred, dgdt = jax.jvp(
             mean_flow_forward, 
             (z, t, r), 
             (v, jnp.ones_like(t), jnp.zeros_like(r))
         )
-        u, dudt = z - x_pred, v - dxdt
-        u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
-        u_tgt = jax.lax.stop_gradient(u_tgt)
-        err = u - u_tgt
-
+        g_tgt = z + (t - r - 1) * v - (t - r) * dgdt
+        g_tgt = jax.lax.stop_gradient(g_tgt)
+        err = g_pred - g_tgt
+        
         loss = adaptive_l2_loss(err)
 
         return loss, {
             'actor_loss': loss,
-            'mf/u_mean': u.mean(),
-            'mf/v_mean': v.mean(),
-            'mf/dudt_mean': dudt.mean(),
         }
 
     def latent_actor_loss(self, batch, grad_params, rng):
@@ -133,8 +138,8 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
                 rng=l_rng,
                 params=grad_params # <--- Gradients flow here
             )
-            e = sample_latent_dist(x_rng, (batch_size, latent_dim), 'normal')
-            z_pred = z_pred + 0.1 * e  # add small noise for better exploration
+            e = sample_latent_dist(e_rng, (batch_size, latent_dim), 'normal')
+            z_pred = z_pred #+ 0.1 * e  # add small noise for better exploration
 
 
         if self.config['extract_method'] in ['onestep_ddpg']:
@@ -371,6 +376,8 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
                 action_dim=full_action_dim,
                 layer_norm=config['actor_layer_norm'],
                 encoder=encoders.get('actor_bc_flow'),
+                use_fourier_features=config['use_fourier_features'],
+                fourier_feature_dim=config['fourier_feature_dim']
             )
 
         latent_actor_def = ActorVectorField(
