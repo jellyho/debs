@@ -405,7 +405,7 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
-            flow_ratio=0.25,
+            flow_ratio=0.50,
             latent_dist='normal',
             use_DiT=False,
             mf_method='mf'

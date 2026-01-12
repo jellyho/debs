@@ -4,7 +4,7 @@ MUJOCO_GL=egl
 python main.py \
     --agent "agents/$2.py" \
     --project "debs" \
-    --run_group=$2:$4:$6 \
+    --run_group=$2:$5 \
     --env_name="bandit-$1" \
     --horizon_length 1 \
     --agent.lr 3e-4 \
@@ -13,8 +13,9 @@ python main.py \
     --offline_steps 100000 \
     --save_dir "exp/" \
     --agent.latent_dist $3 \
-    --agent.mf_method $4 \
-    --seed $5 \
+    --agent.alpha $4 \
+    # --agent.mf_method $4 \
+    # --seed $5 \
     # --agent.use_DiT
     # --agent.mf_method='jit_mf' \
     # --agent.rl_method='ddpg' \

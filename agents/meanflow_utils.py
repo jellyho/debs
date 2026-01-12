@@ -52,10 +52,6 @@ def sample_latent_dist(x_rng, sample_shape, latent_dist='sphere'):
         raw_e = jax.random.normal(x_rng, sample_shape)
         sigma = 0.9 / jnp.sqrt(sample_shape[-1])
         e_scaled = raw_e * sigma
-        
-        # 3. Safety Clipping (Radial)
-        # 0.1%의 확률로 튀는 놈들만 반지름 1로 쳐냅니다.
-        # (LQL Search가 1 밖으로 나가는 것을 방지하기 위한 Boundary 학습용)
         e_norm = jnp.linalg.norm(e_scaled, axis=-1, keepdims=True)
         scale = jnp.minimum(1.0, 1.0 / (e_norm + 1e-6))
         e = e_scaled * scale

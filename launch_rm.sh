@@ -4,11 +4,11 @@
 export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_A6000,gigabyte_A6000,gigabyte_A5000'
 export QOS='big_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="LQL_MLP_DiT"
-export MODEL="meanflow"
+export JOBNAME="LQL_MLP_DiT_trhalf_chunk10"
+export MODEL="meanflowq"
 
-for mf_method in "imf" "jit_mf" "mfql"; do
-    for latent in "truncated_normal" "sphere_plus" "sphere"; do
+for mf_method in "jit_mf"; do
+    for latent in "sphere"; do
         for task in "can" "lift" "square"; do
             for seed in "100"; do
                 echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"

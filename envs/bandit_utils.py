@@ -360,23 +360,23 @@ class ToyBanditEnv(gym.Env):
         # 1. 스타일 및 캔버스 설정
         plt.style.use('default')
         
-        # 3개의 서브플롯 생성 (가로로 긴 형태)
-        # if self.fig is None:
-            # 1행 3열, 전체 크기 (18, 6) -> 각 플롯당 (6, 6)
-        self.fig, self.axes = plt.subplots(1, 2, figsize=(12, 6), dpi=100)
-        
-        # 배경색: 아이보리
-        bg_color = '#FFFDF5'
-        self.fig.patch.set_facecolor(bg_color)
-        for ax in self.axes:
-            ax.set_facecolor(bg_color)
+        # 2개의 서브플롯 생성 (1x2 Layout)
+        if self.fig is None:
+            # 전체 크기 (12, 6) -> 각 플롯당 (6, 6) 정사각형 유지
+            self.fig, self.axes = plt.subplots(1, 2, figsize=(12, 6), dpi=100)
+            
+            # 배경색: 아이보리
+            bg_color = '#FFFDF5'
+            self.fig.patch.set_facecolor(bg_color)
+            for ax in self.axes:
+                ax.set_facecolor(bg_color)
                 
         # 매번 그리기 위해 클리어
         for ax in self.axes:
             ax.clear()
             ax.axis('off')
             
-        # 줌 설정 (공통)
+        # 줌 설정
         limit = 1.2 if not self.pca else 2.5
         for ax in self.axes:
             ax.set_xlim(-limit, limit)
@@ -384,90 +384,51 @@ class ToyBanditEnv(gym.Env):
 
         # 타이틀 설정
         self.axes[0].set_title("Dataset Density (Offline Data)", fontsize=14, fontweight='bold', color='#8B8000')
-        # self.axes[1].set_title("Reward Landscape (Ground Truth)", fontsize=14, fontweight='bold', color='#800080')
         self.axes[1].set_title("Current Policy (Agent)", fontsize=14, fontweight='bold', color='#00008B')
 
         # 필요한 도구 임포트
         from scipy.stats import gaussian_kde
-        import matplotlib.cm as cm
 
-        # 공통 그리드 생성 (등고선용)
+        # 공통 그리드 생성
         grid_res = 100
         x_grid = np.linspace(-limit, limit, grid_res)
         y_grid = np.linspace(-limit, limit, grid_res)
         gx, gy = np.meshgrid(x_grid, y_grid)
-        positions = np.vstack([gx.ravel(), gy.ravel()]) # (2, N)
+        positions = np.vstack([gx.ravel(), gy.ravel()]) 
 
         # ==========================================
-        # Plot 1: Dataset Density (Yellow ~ Orange)
+        # Plot 1: Dataset Density (Left) - Yellow/Orange
         # ==========================================
         ax_data = self.axes[0]
         
-        # GT Data가 있으면 KDE 계산
         if self.gt_data_2d is not None:
             try:
-                # KDE 계산 (Dataset은 고정되어 있으므로 사실 캐싱하면 더 빠르지만, 여기선 매번 계산)
-                # 데이터가 많으면 subsample을 쓰는 것이 좋음 (여기선 2000개라 가정)
-                data_kde = gaussian_kde(self.gt_data_2d.T)
+                # Jittering & Bandwidth Fix
+                noise = np.random.normal(0, 0.02, size=self.gt_data_2d.shape)
+                data_safe = self.gt_data_2d + noise
+                
+                data_kde = gaussian_kde(data_safe.T)
+                data_kde.set_bandwidth(bw_method=0.2)
+                
                 z_data = data_kde(positions).reshape(grid_res, grid_res)
                 z_data_norm = z_data / (z_data.max() + 1e-8)
                 
-                # YlOrBr: Yellow -> Orange -> Brown
-                # 0.1 이하는 투명하게
+                # YlOrBr: Yellow -> Orange
                 ax_data.contourf(gx, gy, z_data_norm, levels=np.linspace(0.1, 1.0, 12), cmap='YlOrBr', alpha=0.8)
-                # ax_data.contour(gx, gy, z_data_norm, levels=[0.1], colors=['#B8860B'], linewidths=0.5)
                 
             except Exception:
-                # KDE 실패 시 그냥 점으로 찍기
                 ax_data.scatter(self.gt_data_2d[:, 0], self.gt_data_2d[:, 1], c='orange', s=5, alpha=0.3)
 
         # ==========================================
-        # Plot 2: Reward Landscape (Purple ~ Red) + Colorbar
-        # ==========================================
-        # ax_reward = self.axes[1]
-        
-        # if self.action_dim == 2:
-        #     # 2D 환경: 실제 보상 함수 계산
-        #     points = positions.T # (N, 2)
-        #     rewards = get_reward_batch(self.env_name, points).reshape(grid_res, grid_res)
-            
-        #     # PuRd: Purple -> Red (낮음 -> 높음)
-        #     # vmin=0, vmax=1.2로 고정하여 색상 일관성 유지
-        #     # levels를 0.0부터 시작하여 전체 배경을 칠해줌 (Landscape 느낌)
-        #     cf = ax_reward.contourf(gx, gy, rewards, levels=np.linspace(0.0, 1.0, 12), cmap='PuRd', alpha=0.8)
-            
-        #     # Colorbar 추가 (Plot 내부에 작게 넣거나 오른쪽에 붙임)
-        #     # 여기서는 Plot 오른쪽에 깔끔하게 붙임
-        #     cbar = self.fig.colorbar(cf, ax=ax_reward, fraction=0.046, pad=0.04)
-        #     cbar.ax.tick_params(labelsize=8)
-        #     cbar.outline.set_visible(False)
-            
-        # else:
-        #     # High-Dim (Bandit-6): PCA 공간에서는 전체 Reward Grid를 그릴 수 없음
-        #     # 대신 Cluster Center들의 보상을 시각화
-        #     centers = _get_bandit6_centers()
-        #     centers_2d = self.pca.transform(centers)
-            
-        #     # 각 센터의 보상값 계산
-        #     center_rewards = get_reward_batch(self.env_name, centers) # (9,)
-            
-        #     # Scatter로 표현하되 색상을 Reward에 매핑
-        #     sc = ax_reward.scatter(centers_2d[:, 0], centers_2d[:, 1], c=center_rewards, 
-        #                            cmap='PuRd', s=500, edgecolors='black', vmin=0, vmax=1.0)
-            
-        #     cbar = self.fig.colorbar(sc, ax=ax_reward, fraction=0.046, pad=0.04)
-        #     cbar.ax.tick_params(labelsize=8)
-
-        # ==========================================
-        # Plot 3: Current Action Density (Blue)
+        # Plot 2: Current Action Density (Right) - Blue
         # ==========================================
         ax_policy = self.axes[1]
         
-        # Ground Truth Context (옅게 깔기) - 위치 파악용
+        # # Ground Truth Context (옅은 회색으로 바닥에 깔기 - 위치 확인용)
         # if self.action_dim == 2:
-        #      # Reward 2D Map을 옅은 회색으로 바닥에 깔아줌
         #      points_bg = np.vstack([gx.ravel(), gy.ravel()]).T
         #      rewards_bg = get_reward_batch(self.env_name, points_bg).reshape(grid_res, grid_res)
+        #      # 정답 영역만 살짝 표시
         #      ax_policy.contourf(gx, gy, rewards_bg, levels=[0.5, 2.0], colors=['#E0E0E0'], alpha=0.3)
 
         # Action Density (KDE)
@@ -479,20 +440,22 @@ class ToyBanditEnv(gym.Env):
                 actions_2d = actions
             
             try:
-                kde = gaussian_kde(actions_2d.T)
+                # Jittering & Bandwidth Fix
+                noise = np.random.normal(0, 0.02, size=actions_2d.shape)
+                actions_safe = actions_2d + noise
+                
+                kde = gaussian_kde(actions_safe.T)
+                kde.set_bandwidth(bw_method=0.25)
+                
                 z_act = kde(positions).reshape(grid_res, grid_res)
                 z_act_norm = z_act / (z_act.max() + 1e-8)
                 
-                # Blues: Light Blue -> Dark Blue
+                # Blues: Blue Density
                 ax_policy.contourf(gx, gy, z_act_norm, levels=np.linspace(0.1, 1.0, 10), cmap='Blues', alpha=0.8)
-                # ax_policy.contour(gx, gy, z_act_norm, levels=[0.1], colors=['darkblue'], linewidths=0.5, alpha=0.5)
                 
             except Exception:
-                pass
+                ax_policy.scatter(actions_2d[:, 0], actions_2d[:, 1], c='blue', s=10, alpha=0.5)
             
-            # 최근 샘플 점찍기 (확인용)
-            # ax_policy.scatter(actions_2d[:, 0], actions_2d[:, 1], c='black', s=5, alpha=0.2)
-
         # ==========================================
         # 캡처 로직 (buffer_rgba)
         # ==========================================

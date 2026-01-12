@@ -9,7 +9,7 @@ python main.py \
     --run_group "$2:$5" \
     --task_name $1 \
     --env_name "$1-mh-low_dim" \
-    --horizon_length 5 \
+    --horizon_length 10 \
     --agent.lr 3e-4 \
     --eval_interval 100000 \
     --eval_episodes 50 \
