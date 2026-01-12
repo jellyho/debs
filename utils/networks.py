@@ -311,82 +311,15 @@ class ActorVectorField(nn.Module):
         inputs = []
         if not is_encoded and self.encoder is not None:
             observations = self.encoder(observations)
-        print('obs_shape:', observations.shape)
         inputs.append(observations)
 
         if actions is not None:
-            print('action_shape:', actions.shape)
             inputs.append(actions)
 
         if times is not None:
             if self.use_fourier_features:
                 times = self.ff(times)
-            print('time_shape:', times.shape)
             inputs.append(times)
-
-        if v_base is not None:
-            print('v_base_shape:', v_base.shape)
-            inputs.append(v_base)
-
-        inputs = jnp.concatenate(inputs, axis=-1)
-
-        v = self.mlp(inputs)
-
-        if self.latent_dist == 'normal':
-            return v
-        elif self.latent_dist == 'truncated_normal':
-            return nn.tanh(v) * 2
-        elif self.latent_dist == 'uniform':
-            return nn.tanh(v)
-        elif self.latent_dist == 'simplex':
-            return nn.softmax(v)
-        elif self.latent_dist == 'sphere':
-            sq_sum = jnp.sum(jnp.square(v), axis=-1, keepdims=True)
-            norm = jnp.sqrt(sq_sum + 1e-6) 
-            return v / norm * jnp.sqrt(self.action_dim)
-        elif self.latent_dist == 'beta':
-            # Beta(2,2) Scaled Target이 [-1, 1]이므로 
-            # Tanh를 통해 [-1, 1]로 범위를 맞춤
-            return 2 * nn.tanh(v)
-        print('Hi, Im one step actor')
-        return v
-
-class LatentActor(nn.Module):
-    """Actor vector field network for flow matching.
-
-    Attributes:
-        hidden_dims: Hidden layer dimensions.
-        action_dim: Action dimension.
-        layer_norm: Whether to apply layer normalization.
-        encoder: Optional encoder module to encode the inputs.
-    """
-
-    hidden_dims: Sequence[int]
-    action_dim: int
-    layer_norm: bool = False
-    encoder: nn.Module = None
-    latent_dist: str = 'normal'
-
-    def setup(self) -> None:
-        self.mlp = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
-
-    @nn.compact
-    def __call__(self, observations, actions=None, v_base=None, is_encoded=False, rng=None, evaluation=None):
-        """Return the vectors at the given states, actions, and times (optional).
-
-        Args:
-            observations: Observations.
-            actions: Actions.
-            times: Times (optional).
-            is_encoded: Whether the observations are already encoded.
-        """
-        inputs = []
-        if not is_encoded and self.encoder is not None:
-            observations = self.encoder(observations)
-        inputs.append(observations)
-
-        if actions is not None:
-            inputs.append(actions)
 
         if v_base is not None:
             inputs.append(v_base)
@@ -410,6 +343,8 @@ class LatentActor(nn.Module):
             sq_sum = jnp.sum(jnp.square(v), axis=-1, keepdims=True)
             norm = jnp.sqrt(sq_sum + 1e-6) 
             return v / norm * jnp.sqrt(self.action_dim)
+        elif self.latent_dist == 'beta':
+            return 2 * nn.tanh(v)
         return v
 
 class AdvantageConditionedActorVectorField(nn.Module):
