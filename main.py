@@ -53,6 +53,7 @@ flags.DEFINE_string('ogbench_dataset_dir', None, 'OGBench dataset directory')
 flags.DEFINE_integer('horizon_length', 5, 'action chunking length.')
 flags.DEFINE_bool('sparse', False, "make the task sparse reward")
 flags.DEFINE_bool('save_all_online_states', False, "save all trajectories to npy")
+flags.DEFINE_bool('record_time', False, "time_rocording")
 
 class LoggingHelper:
     def __init__(self, wandb_logger):

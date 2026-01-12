@@ -6,11 +6,12 @@ import seaborn as sns
 from tqdm import tqdm
 from scipy.stats import bootstrap
 
-def get_filtered_data(entity, project, config, x_key='_step', y_key='eval/success'):
+def get_filtered_data(entity, project, config, x_key='_step', y_key='eval/success', extra_keys=[]):
     api = wandb.Api()
     
     # WandB API Filter 생성 (MongoDB Query Style)
     # config['filters']에 있는 내용을 API 쿼리로 변환
+    keys = [x_key, y_key]
     query_filters = {}
     for k, v in config['filters'].items():
         # config.으로 시작하지 않는 일반 키(group, state 등) 처리
@@ -40,7 +41,13 @@ def get_filtered_data(entity, project, config, x_key='_step', y_key='eval/succes
             if target_values is not None and group_val not in target_values:
                 continue
 
-        hist = run.history(keys=[x_key, y_key])
+        hist = run.history(keys=keys, pandas=True)
+        for extra_key in extra_keys:
+            # Nested config keys support
+            extra_val = run.config
+            for key_part in extra_key.replace("config.", "").split("."):
+                extra_val = extra_val.get(key_part, None)
+            hist[extra_key] = extra_val
 
         hist["group_id"] = f"{config['prefix']}_{group_val}"
         all_dfs.append(hist)
@@ -132,18 +139,23 @@ def plot_custom_config(df, filename='plot'):
     plt.savefig(f'{filename}.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-## MAIN FUNCTION
-def plot_and_save_from_wandb(PLOT_CONFIG):
+def df_from_wandb(PLOT_CONFIG):
     x_key = PLOT_CONFIG['x_key']
     y_key = PLOT_CONFIG['y_key']
+    extra_keys = PLOT_CONFIG.get('extra_keys', [])
 
     dfs = []
 
     for config in PLOT_CONFIG['configs']:
-        df = get_filtered_data(PLOT_CONFIG['WANDB_ENTITY'], PLOT_CONFIG['WANDB_PROJECT'], config, x_key, y_key)
+        df = get_filtered_data(PLOT_CONFIG['WANDB_ENTITY'], PLOT_CONFIG['WANDB_PROJECT'], config, x_key, y_key, extra_keys)
         dfs.append(df)
 
     if len(dfs) > 0:
         dfs = pd.concat(dfs)
-    # return dfs
+    return dfs
+
+## MAIN FUNCTION
+def plot_and_save_from_wandb(PLOT_CONFIG):
+    dfs = df_from_wandb(PLOT_CONFIG)
     plot_custom_config(dfs, f"{PLOT_CONFIG['folder']}/{PLOT_CONFIG['title']}")
+
