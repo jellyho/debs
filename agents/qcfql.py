@@ -193,12 +193,7 @@ class QCFQLAgent(flax.struct.PyTreeNode):
     ):
         latent_dim = self.config["horizon_length"] * self.config["action_dim"]
         rng, x_rng = jax.random.split(rng, 2)
-        print(self.config['ob_dims'])
-        print(observations.shape)
-        print(observations.shape[: -len(self.config['ob_dims'])])
         e = self.sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim))
-        print('e shape:', e.shape)
-        
         actions = self.network.select(f'actor_onestep_flow')(
             observations, 
             e,
@@ -348,6 +343,10 @@ def get_config():
             fourier_feature_dim=64,
             weight_decay=0.,
             latent_dist='uniform',
+
+            ####### Unused parameters for compatibility #######
+            extract_method="unused",
+            flow_ratio=0.25,
         )
     )
     return config

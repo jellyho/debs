@@ -119,10 +119,6 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         ############################################
         elif self.config['mf_method'] == 'ximf':
             x_pred = mean_flow_forward(z, t, r)
-            
-            # 2. JVP: Calculate time derivative of x_pred
-            # Tangents: z -> v (flow direction), t -> 1, r -> 0
-
             x_pred, dxdt = jax.jvp(
                 mean_flow_forward, 
                 (z, t, r), 

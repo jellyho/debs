@@ -240,6 +240,7 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         actions = self.network.select('onestep_actor')(
             observations, 
             e,
+            is_encoded=False
         )
         actions = jnp.reshape(
             actions, 
@@ -256,9 +257,6 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         noise,
     ):
         """Compute actions from the BC flow model using the Euler method."""
-        if self.config['encoder'] is not None:
-            observation = self.network.select('actor_bc_flow_encoder')(observation)
-
         t = jnp.ones((*observation.shape[:-1], 1))
         r = jnp.zeros((*observation.shape[:-1], 1))
         
@@ -266,7 +264,8 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
             observation,
             noise, 
             t, 
-            t - r
+            t - r,
+            is_encoded=False
         )
         action = jnp.clip(output, -1, 1)
         return action
@@ -300,14 +299,15 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
             (ex_actions.shape[0], -1)
         )
         full_action_dim = full_actions.shape[-1]
+        ex_times = full_actions[..., :1]
 
         # Define encoders.
         encoders = dict()
         if config['encoder'] is not None:
             encoder_module = encoder_modules[config['encoder']]
             encoders['critic'] = encoder_module()
-            encoders['value'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()
+            encoders['onestep_actor'] = encoder_module()
 
         critic_def = Value(
             hidden_dims=config['critic_hidden_dims'],
@@ -327,8 +327,7 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_bc_flow'),
-            latent_dist='onestep'
+            encoder=encoders.get('onestep_actor'),
         )
 
         network_info = dict(
@@ -386,7 +385,10 @@ def get_config():
             weight_decay=0.,
             latent_dist='uniform',
             alpha=1.0,
-            flow_ratio=0.25
+            flow_ratio=0.25,
+            
+            ####### Unused parameters for compatibility #######
+            extract_method="unused",
         )
     )
     return config
