@@ -48,6 +48,17 @@ def sample_t_r(batch_size, rng, flow_ratio=0.25):
 def sample_latent_dist(x_rng, sample_shape, latent_dist='sphere'):
     if latent_dist == 'normal':
         e = jax.random.normal(x_rng, sample_shape)
+    elif latent_dist == 'truncated_normal':
+        raw_e = jax.random.normal(x_rng, sample_shape)
+        sigma = 0.9 / jnp.sqrt(sample_shape[-1])
+        e_scaled = raw_e * sigma
+        
+        # 3. Safety Clipping (Radial)
+        # 0.1%의 확률로 튀는 놈들만 반지름 1로 쳐냅니다.
+        # (LQL Search가 1 밖으로 나가는 것을 방지하기 위한 Boundary 학습용)
+        e_norm = jnp.linalg.norm(e_scaled, axis=-1, keepdims=True)
+        scale = jnp.minimum(1.0, 1.0 / (e_norm + 1e-6))
+        e = e_scaled * scale
     elif latent_dist == 'uniform':
         e = jax.random.uniform(x_rng, sample_shape, minval=-1.0, maxval=1.0)
     elif latent_dist == 'sphere':
@@ -55,6 +66,13 @@ def sample_latent_dist(x_rng, sample_shape, latent_dist='sphere'):
         sq_sum = jnp.sum(jnp.square(e), axis=-1, keepdims=True)
         norm = jnp.sqrt(sq_sum + 1e-6)
         e = e / norm * jnp.sqrt(sample_shape[-1])
+    elif latent_dist == 'sphere_plus':
+        action_dim = sample_shape[-1]
+        sample_shape = sample_shape[:-1] + (action_dim + 1,)
+        e = jax.random.normal(x_rng, sample_shape)
+        e_norm = jnp.linalg.norm(e, axis=-1, keepdims=True)
+        e = e / (e_norm + 1e-6)
+        e = e[..., :-1]
     return e
 
     

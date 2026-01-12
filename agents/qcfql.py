@@ -193,12 +193,18 @@ class QCFQLAgent(flax.struct.PyTreeNode):
     ):
         latent_dim = self.config["horizon_length"] * self.config["action_dim"]
         rng, x_rng = jax.random.split(rng, 2)
-
+        print(self.config['ob_dims'])
+        print(observations.shape)
+        print(observations.shape[: -len(self.config['ob_dims'])])
         e = self.sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim))
+        print('e shape:', e.shape)
+        
         actions = self.network.select(f'actor_onestep_flow')(
             observations, 
-            e
+            e,
+            is_encoded=False
         )
+
         actions = jnp.clip(actions, -1, 1)
         actions = jnp.reshape(
             actions, 
@@ -244,8 +250,7 @@ class QCFQLAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ex_times = ex_observations[..., :1]
-        ob_dims = ex_observations.shape[-1:]
+        ob_dims = ex_observations.shape[1:]
         action_dim = ex_actions.shape[-1]
 
         full_actions = jnp.reshape(
@@ -253,10 +258,12 @@ class QCFQLAgent(flax.struct.PyTreeNode):
             (ex_actions.shape[0], -1)
         )
         full_action_dim = full_actions.shape[-1]
+        ex_times = full_actions[..., :1]
 
         # Define encoders.
         encoders = dict()
         if config['encoder'] is not None:
+            print('Using encoder:', config['encoder'])
             encoder_module = encoder_modules[config['encoder']]
             encoders['critic'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()

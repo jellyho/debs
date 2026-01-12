@@ -357,74 +357,149 @@ class ToyBanditEnv(gym.Env):
             return np.zeros(self.obs_dim, dtype=np.float32), float(reward), True, False, {}
 
     def render(self):
-        if self.fig is None:
-            self.fig, self.ax = plt.subplots(figsize=(5, 5))
-            
-        self.ax.clear()
-        if self.pca:
-            self.ax.set_xlim(-2, 2)
-            self.ax.set_ylim(-2, 2)
-        else:
-            self.ax.set_xlim(-1.1, 1.1)
-            self.ax.set_ylim(-1.1, 1.1)
-        title_str = f"{self.env_name} (Dim={self.action_dim})"
-        if self.pca: title_str += " [PCA Projected]"
-        self.ax.set_title(f"{title_str}")
-
-        # 1. Background: Data Manifold (Ground Truth)
-        self.ax.scatter(self.gt_data_2d[:, 0], self.gt_data_2d[:, 1], 
-                        c='gray', s=10, alpha=0.1, label='Data Dist.')
-        # self.ax.scatter(self.gt_data[:, 0], self.gt_data[:, 1], c='gray', s=5, alpha=0.1, label='GT Data')
+        # 1. 스타일 및 캔버스 설정
+        plt.style.use('default')
         
-        # 2. Reward Region (Goal) - Bandit 6의 경우 Center 0
-        if self.env_name == 'bandit-6':
-            centers = _get_bandit6_centers()
-            target_50d = centers[0:1] # (1, 50)
-            # Target도 PCA로 변환해서 찍어야 함
-            target_2d = self.pca.transform(target_50d)
-            self.ax.scatter(target_2d[:, 0], target_2d[:, 1], 
-                            c='green', marker='*', s=300, label='Optimal (Hidden)', edgecolors='black')
-        else:
-            # 2. Background: Reward Region (Goal)
-            grid = np.linspace(-1, 1, 50)
-            gx, gy = np.meshgrid(grid, grid)
-            gpoints = np.vstack([gx.ravel(), gy.ravel()]).T
-            grewards = get_reward_batch(self.env_name, gpoints)
-            if grewards.sum() > 0:
-                self.ax.scatter(gpoints[grewards>0, 0], gpoints[grewards>0, 1], c='green', s=5, alpha=0.1, label='Goal')
+        # 3개의 서브플롯 생성 (가로로 긴 형태)
+        # if self.fig is None:
+            # 1행 3열, 전체 크기 (18, 6) -> 각 플롯당 (6, 6)
+        self.fig, self.axes = plt.subplots(1, 2, figsize=(12, 6), dpi=100)
+        
+        # 배경색: 아이보리
+        bg_color = '#FFFDF5'
+        self.fig.patch.set_facecolor(bg_color)
+        for ax in self.axes:
+            ax.set_facecolor(bg_color)
+                
+        # 매번 그리기 위해 클리어
+        for ax in self.axes:
+            ax.clear()
+            ax.axis('off')
+            
+        # 줌 설정 (공통)
+        limit = 1.2 if not self.pca else 2.5
+        for ax in self.axes:
+            ax.set_xlim(-limit, limit)
+            ax.set_ylim(-limit, limit)
 
-        # 3. Foreground: Agent Actions (Batch Scatter)
+        # 타이틀 설정
+        self.axes[0].set_title("Dataset Density (Offline Data)", fontsize=14, fontweight='bold', color='#8B8000')
+        # self.axes[1].set_title("Reward Landscape (Ground Truth)", fontsize=14, fontweight='bold', color='#800080')
+        self.axes[1].set_title("Current Policy (Agent)", fontsize=14, fontweight='bold', color='#00008B')
+
+        # 필요한 도구 임포트
+        from scipy.stats import gaussian_kde
+        import matplotlib.cm as cm
+
+        # 공통 그리드 생성 (등고선용)
+        grid_res = 100
+        x_grid = np.linspace(-limit, limit, grid_res)
+        y_grid = np.linspace(-limit, limit, grid_res)
+        gx, gy = np.meshgrid(x_grid, y_grid)
+        positions = np.vstack([gx.ravel(), gy.ravel()]) # (2, N)
+
+        # ==========================================
+        # Plot 1: Dataset Density (Yellow ~ Orange)
+        # ==========================================
+        ax_data = self.axes[0]
+        
+        # GT Data가 있으면 KDE 계산
+        if self.gt_data_2d is not None:
+            try:
+                # KDE 계산 (Dataset은 고정되어 있으므로 사실 캐싱하면 더 빠르지만, 여기선 매번 계산)
+                # 데이터가 많으면 subsample을 쓰는 것이 좋음 (여기선 2000개라 가정)
+                data_kde = gaussian_kde(self.gt_data_2d.T)
+                z_data = data_kde(positions).reshape(grid_res, grid_res)
+                z_data_norm = z_data / (z_data.max() + 1e-8)
+                
+                # YlOrBr: Yellow -> Orange -> Brown
+                # 0.1 이하는 투명하게
+                ax_data.contourf(gx, gy, z_data_norm, levels=np.linspace(0.1, 1.0, 12), cmap='YlOrBr', alpha=0.8)
+                # ax_data.contour(gx, gy, z_data_norm, levels=[0.1], colors=['#B8860B'], linewidths=0.5)
+                
+            except Exception:
+                # KDE 실패 시 그냥 점으로 찍기
+                ax_data.scatter(self.gt_data_2d[:, 0], self.gt_data_2d[:, 1], c='orange', s=5, alpha=0.3)
+
+        # ==========================================
+        # Plot 2: Reward Landscape (Purple ~ Red) + Colorbar
+        # ==========================================
+        # ax_reward = self.axes[1]
+        
+        # if self.action_dim == 2:
+        #     # 2D 환경: 실제 보상 함수 계산
+        #     points = positions.T # (N, 2)
+        #     rewards = get_reward_batch(self.env_name, points).reshape(grid_res, grid_res)
+            
+        #     # PuRd: Purple -> Red (낮음 -> 높음)
+        #     # vmin=0, vmax=1.2로 고정하여 색상 일관성 유지
+        #     # levels를 0.0부터 시작하여 전체 배경을 칠해줌 (Landscape 느낌)
+        #     cf = ax_reward.contourf(gx, gy, rewards, levels=np.linspace(0.0, 1.0, 12), cmap='PuRd', alpha=0.8)
+            
+        #     # Colorbar 추가 (Plot 내부에 작게 넣거나 오른쪽에 붙임)
+        #     # 여기서는 Plot 오른쪽에 깔끔하게 붙임
+        #     cbar = self.fig.colorbar(cf, ax=ax_reward, fraction=0.046, pad=0.04)
+        #     cbar.ax.tick_params(labelsize=8)
+        #     cbar.outline.set_visible(False)
+            
+        # else:
+        #     # High-Dim (Bandit-6): PCA 공간에서는 전체 Reward Grid를 그릴 수 없음
+        #     # 대신 Cluster Center들의 보상을 시각화
+        #     centers = _get_bandit6_centers()
+        #     centers_2d = self.pca.transform(centers)
+            
+        #     # 각 센터의 보상값 계산
+        #     center_rewards = get_reward_batch(self.env_name, centers) # (9,)
+            
+        #     # Scatter로 표현하되 색상을 Reward에 매핑
+        #     sc = ax_reward.scatter(centers_2d[:, 0], centers_2d[:, 1], c=center_rewards, 
+        #                            cmap='PuRd', s=500, edgecolors='black', vmin=0, vmax=1.0)
+            
+        #     cbar = self.fig.colorbar(sc, ax=ax_reward, fraction=0.046, pad=0.04)
+        #     cbar.ax.tick_params(labelsize=8)
+
+        # ==========================================
+        # Plot 3: Current Action Density (Blue)
+        # ==========================================
+        ax_policy = self.axes[1]
+        
+        # Ground Truth Context (옅게 깔기) - 위치 파악용
+        # if self.action_dim == 2:
+        #      # Reward 2D Map을 옅은 회색으로 바닥에 깔아줌
+        #      points_bg = np.vstack([gx.ravel(), gy.ravel()]).T
+        #      rewards_bg = get_reward_batch(self.env_name, points_bg).reshape(grid_res, grid_res)
+        #      ax_policy.contourf(gx, gy, rewards_bg, levels=[0.5, 2.0], colors=['#E0E0E0'], alpha=0.3)
+
+        # Action Density (KDE)
         if self.last_actions is not None:
-            # 배치 차원 보정
             actions = np.atleast_2d(self.last_actions)
-            rewards = np.atleast_1d(self.last_rewards)
-            
-            # 보상에 따라 색상 구분 (성공: 빨강, 실패: 파랑)
-            # matplotlib scatter는 색상 배열을 받을 수 있음
-            colors = np.where(rewards == 1, 'red', 'blue')
-            
             if self.pca:
                 actions_2d = self.pca.transform(actions)
             else:
                 actions_2d = actions
+            
+            try:
+                kde = gaussian_kde(actions_2d.T)
+                z_act = kde(positions).reshape(grid_res, grid_res)
+                z_act_norm = z_act / (z_act.max() + 1e-8)
+                
+                # Blues: Light Blue -> Dark Blue
+                ax_policy.contourf(gx, gy, z_act_norm, levels=np.linspace(0.1, 1.0, 10), cmap='Blues', alpha=0.8)
+                # ax_policy.contour(gx, gy, z_act_norm, levels=[0.1], colors=['darkblue'], linewidths=0.5, alpha=0.5)
+                
+            except Exception:
+                pass
+            
+            # 최근 샘플 점찍기 (확인용)
+            # ax_policy.scatter(actions_2d[:, 0], actions_2d[:, 1], c='black', s=5, alpha=0.2)
 
-            self.ax.scatter(
-                actions_2d[:, 0], actions_2d[:, 1], 
-                c=colors, 
-                s=30,       # 점 크기
-                marker='x', # 마커 모양
-                alpha=0.6,  # 투명도
-                label='Agent'
-            )
-
-        # self.ax.legend(loc='upper right')
-
-        io_buf = io.BytesIO()
-        self.fig.savefig(io_buf, format='raw', dpi=100)
-        io_buf.seek(0)
-        img_arr = np.reshape(np.frombuffer(io_buf.getvalue(), dtype=np.uint8),
-                                newshape=(int(self.fig.bbox.bounds[3]), int(self.fig.bbox.bounds[2]), -1))
-        io_buf.close()
+        # ==========================================
+        # 캡처 로직 (buffer_rgba)
+        # ==========================================
+        self.fig.canvas.draw()
+        img_rgba = np.asarray(self.fig.canvas.buffer_rgba())
+        img_arr = np.array(img_rgba[:, :, :3], dtype=np.uint8)
+            
         return img_arr
             
     def close(self):

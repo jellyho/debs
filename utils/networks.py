@@ -307,20 +307,25 @@ class ActorVectorField(nn.Module):
             times: Times (optional).
             is_encoded: Whether the observations are already encoded.
         """
+        
         inputs = []
         if not is_encoded and self.encoder is not None:
             observations = self.encoder(observations)
+        print('obs_shape:', observations.shape)
         inputs.append(observations)
 
         if actions is not None:
+            print('action_shape:', actions.shape)
             inputs.append(actions)
 
         if times is not None:
             if self.use_fourier_features:
                 times = self.ff(times)
+            print('time_shape:', times.shape)
             inputs.append(times)
 
         if v_base is not None:
+            print('v_base_shape:', v_base.shape)
             inputs.append(v_base)
 
         inputs = jnp.concatenate(inputs, axis=-1)
@@ -391,24 +396,12 @@ class LatentActor(nn.Module):
         v = self.mlp(inputs)
 
         if self.latent_dist == 'normal':
-            means = nn.Dense(self.action_dim)(v)
-            log_stds = nn.Dense(self.action_dim)(v)
-            log_stds = jnp.clip(log_stds, -20, 2)
-            stds = jnp.exp(log_stds)
-            base_dist = distrax.MultivariateNormalDiag(loc=means, scale_diag=stds)
-            bijector = distrax.Chain([
-                # (2) [-1, 1] 범위를 [low, high] 범위로 선형 변환 (Shift & Scale)
-                distrax.ScalarAffine(shift=0, scale=2),
-                # (1) (-inf, inf) 범위를 (-1, 1)로 누름 (Tanh)
-                distrax.Tanh()
-            ])
-            dist = distrax.Transformed(distribution=base_dist, bijector=bijector)
-            if evaluation:
-                return dist.mode()
-            else:
-                return dist.sample(rng)
-
             return v
+        elif self.latent_dist == 'truncated_normal':
+            norm = jnp.linalg.norm(v, axis=-1, keepdims=True)
+            scale = 2.0 * jnp.tanh(norm) / (norm + 1e-6)
+            z = v * scale
+            return z
         elif self.latent_dist == 'uniform':
             return nn.tanh(v)
         elif self.latent_dist == 'simplex':

@@ -24,8 +24,8 @@
 export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_A6000,gigabyte_A6000,gigabyte_A5000'
 export QOS='big_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="QC_FQL_VISUAL"
-export MODEL="qcfql"
+export JOBNAME="MF_LQL_VISUAL_FINAL"
+export MODEL="meanflowq"
 
 # "cube-double-play" "scene-play" "puzzle-3x3-play" "puzzle-4x4-play"; do
 # "normal"
@@ -54,3 +54,111 @@ for task_num in "1"; do
         done
     done
 done
+##############################################################################
+for task_num in "1"; do
+    for latent in "sphere"; do
+        for task in "cube-double-play"; do
+            for seed in "100" "200" "300"; do
+                for alpha in "3.0"; do
+                    echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+                    sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_visual_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+                done
+            done
+        done
+    done
+done
+
+for task_num in "1"; do
+    for latent in "normal"; do
+        for task in "cube-double-play"; do
+            for seed in "100" "200" "300"; do
+                for alpha in "3.0"; do
+                    echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+                    sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_visual_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+                done
+            done
+        done
+    done
+done
+##############################################################################
+##############################################################################
+for task_num in "1"; do
+    for latent in "sphere"; do
+        for task in "scene-play"; do
+            for seed in "100" "200" "300"; do
+                for alpha in "1.0"; do
+                    echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+                    sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_visual_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+                done
+            done
+        done
+    done
+done
+
+for task_num in "1"; do
+    for latent in "normal"; do
+        for task in "scene-play"; do
+            for seed in "100" "200" "300"; do
+                for alpha in "1.0"; do
+                    echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+                    sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_visual_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+                done
+            done
+        done
+    done
+done
+##############################################################################
+##############################################################################
+for task_num in "1"; do
+    for latent in "sphere"; do
+        for task in "puzzle-3x3-play"; do
+            for seed in "100" "200" "300"; do
+                for alpha in "3.0"; do
+                    echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+                    sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_visual_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+                done
+            done
+        done
+    done
+done
+
+for task_num in "1"; do
+    for latent in "normal"; do
+        for task in "puzzle-3x3-play"; do
+            for seed in "100" "200" "300"; do
+                for alpha in "3.0"; do
+                    echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+                    sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_visual_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+                done
+            done
+        done
+    done
+done
+##############################################################################
+##############################################################################
+for task_num in "1"; do
+    for latent in "sphere"; do
+        for task in "puzzle-4x4-play"; do
+            for seed in "100" "200" "300"; do
+                for alpha in "3.0"; do
+                    echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+                    sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_visual_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+                done
+            done
+        done
+    done
+done
+
+for task_num in "1"; do
+    for latent in "normal"; do
+        for task in "puzzle-4x4-play"; do
+            for seed in "100" "200" "300"; do
+                for alpha in "3.0"; do
+                    echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+                    sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_visual_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+                done
+            done
+        done
+    done
+done
+##############################################################################

@@ -4,7 +4,7 @@ MUJOCO_GL=egl
 python main.py \
     --agent "agents/$2.py" \
     --project "debs" \
-    --run_group=$2 \
+    --run_group=$2:$4:$6 \
     --env_name="bandit-$1" \
     --horizon_length 1 \
     --agent.lr 3e-4 \
@@ -12,9 +12,11 @@ python main.py \
     --video_episodes 1 \
     --offline_steps 100000 \
     --save_dir "exp/" \
-    --agent.mf_method='jit_mf' \
-    --agent.rl_method='ddpg' \
-    --agent.extract_method='ddpg' \
-    --agent.num_critic=2 \
-    --agent.latent_dist='sphere' \
-    --agent.alpha 1.0
+    --agent.latent_dist $3 \
+    --agent.mf_method $4 \
+    --seed $5 \
+    # --agent.use_DiT
+    # --agent.mf_method='jit_mf' \
+    # --agent.rl_method='ddpg' \
+    # --agent.extract_method='ddpg' \
+    # --agent.num_critic=2 \

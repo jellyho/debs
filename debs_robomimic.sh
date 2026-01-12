@@ -19,8 +19,10 @@ python main.py \
     --agent.num_critic 2 \
     --agent.latent_dist "$3" \
     --seed $6 \
+    --agent.mf_method $7 \
     --agent.use_DiT
     # --agent.alpha $4 \
+    
     # --agent.extract_method "ddpg" \
     # --agent.use_DiT
     # --agent.time_dist "$6" \

@@ -90,27 +90,68 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
                 params=grad_params
             )
 
-        # x_pred, dxdt = jax.jvp(
-        #     mean_flow_forward, 
-        #     (z, t, r), 
-        #     (v, jnp.ones_like(t), jnp.zeros_like(r))
-        # )
-        # u, dudt = z - x_pred, v - dxdt
-        # u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
-        # u_tgt = jax.lax.stop_gradient(u_tgt)
-        # u_tgt = jnp.clip(u_tgt, -2.0, 2.0)
-        # err = u - u_tgt
+        ############################################
+        if self.config['mf_method'] == 'jit_mf':
+            x_pred, dxdt = jax.jvp(
+                mean_flow_forward, 
+                (z, t, r), 
+                (v, jnp.ones_like(t), jnp.zeros_like(r))
+            )
+            u, dudt = z - x_pred, v - dxdt
+            u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
+            u_tgt = jax.lax.stop_gradient(u_tgt)
+            err = u - u_tgt
+            loss = adaptive_l2_loss(err)
+        ############################################
 
-        g_pred, dgdt = jax.jvp(
-            mean_flow_forward, 
-            (z, t, r), 
-            (v, jnp.ones_like(t), jnp.zeros_like(r))
-        )
-        g_tgt = z + (t - r - 1) * v - (t - r) * dgdt
-        g_tgt = jax.lax.stop_gradient(g_tgt)
-        err = g_pred - g_tgt
-        
-        loss = adaptive_l2_loss(err)
+        ############################################
+        elif self.config['mf_method'] == 'mfql':
+            g_pred, dgdt = jax.jvp(
+                mean_flow_forward, 
+                (z, t, r), 
+                (v, jnp.ones_like(t), jnp.zeros_like(r))
+            )
+            g_tgt = z + (t - r - 1) * v - (t - r) * dgdt
+            g_tgt = jax.lax.stop_gradient(g_tgt)
+            err = g_pred - g_tgt
+            loss = adaptive_l2_loss(err)
+
+        ############################################
+        elif self.config['mf_method'] == 'ximf':
+            x_pred = mean_flow_forward(z, t, r)
+            
+            # 2. JVP: Calculate time derivative of x_pred
+            # Tangents: z -> v (flow direction), t -> 1, r -> 0
+
+            x_pred, dxdt = jax.jvp(
+                mean_flow_forward, 
+                (z, t, r), 
+                (v, jnp.ones_like(t), jnp.zeros_like(r))
+            )
+
+            X_est = x_pred + (t - r) * jax.lax.stop_gradient(dxdt)
+            X_tgt = x
+            
+            # 4. Loss Calculation
+            err = X_est - X_tgt
+            loss = adaptive_l2_loss(err)
+        elif self.config['mf_method'] == 'imf':
+            v_pred = mean_flow_forward(z, t, t)
+
+            u_pred, dudt = jax.jvp(
+                mean_flow_forward, 
+                (z, t, r), 
+                (v_pred, jnp.ones_like(t), jnp.zeros_like(r))
+            )
+
+            X_est = u_pred + (t - r) * jax.lax.stop_gradient(dudt)
+            X_tgt = e - x
+
+            # 4. Loss Calculation
+            err = X_est - X_tgt
+            loss = adaptive_l2_loss(err)
+        #########################################
+
 
         return loss, {
             'actor_loss': loss,
@@ -362,7 +403,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
 
         if config['use_DiT']:
             actor_bc_flow_def = MFDiT_REAL(
-                hidden_dim=128,
+                hidden_dim=256,
                 depth=3,
                 num_heads=2,
                 output_dim=action_dim,  
@@ -452,7 +493,8 @@ def get_config():
             latent_dist='sphere',
             extract_method='ddpg', # 'ddpg', 'awr',,
             alpha=1.0,
-            use_DiT=False
+            use_DiT=False,
+            mf_method='jit_mf', # 'jit_mf', 'mfql', 'ximf'
         )
     )
     return config
