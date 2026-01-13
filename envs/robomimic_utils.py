@@ -3,7 +3,7 @@ import os
 
 import numpy as np
 import gymnasium as gym
-from gymnasium.spaces import Box
+from gymnasium.spaces import Box, Dict
 import imageio
 import h5py
 
@@ -18,7 +18,7 @@ from utils.datasets import Dataset
 
 def is_robomimic_env(env_name):
     """determine if an env is robomimic"""
-    if "low_dim" not in env_name:
+    if "low_dim" not in env_name or "image" not in env_name:
         return False
     task, dataset_type, hdf5_type = env_name.split("-")
     return task in ("lift", "can", "square", "transport", "tool_hang") and dataset_type in ("mh", "ph")
@@ -52,7 +52,6 @@ def make_env(env_name, seed=0):
     """
     # _download_dataset_and_metadata(env_name)
     dataset_path = _check_dataset_exists(env_name)
-
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path)
     max_episode_length = _get_max_episode_length(env_name)
     
@@ -61,7 +60,10 @@ def make_env(env_name, seed=0):
         render=True, 
         render_offscreen=True,
     )
-    env = RobomimicLowdimWrapper(env, low_dim_keys=low_dim_keys["low_dim"], max_episode_length=max_episode_length)
+    if env_meta['env_kwargs']['use_camera_obs']:
+        env = RobomimicImageWrapper(env, max_episode_length=max_episode_length)
+    else:
+        env = RobomimicLowdimWrapper(env, low_dim_keys=low_dim_keys["low_dim"], max_episode_length=max_episode_length)
     env.seed(seed)
     
     return env
@@ -69,10 +71,17 @@ def make_env(env_name, seed=0):
 def _check_dataset_exists(env_name):
     # enforce that the dataset exists
     task, dataset_type, hdf5_type = env_name.split("-")
+    if hdf5_type == "image":
+        visual = True
+    else:
+        visual = False
     if dataset_type == "mg":
         file_name = "low_dim_sparse_v15.hdf5"
     else:
-        file_name = "low_dim_v15.hdf5"
+        if visual:
+            file_name = "image_v15.hdf5"
+        else:
+            file_name = "low_dim_v15.hdf5"
     download_folder = os.path.join(
         expanduser("~/.robomimic"), 
         task,
@@ -136,6 +145,127 @@ def get_dataset(env, env_name):
         next_observations=np.concatenate(next_observations, axis=0),
     )
 
+class RobomimicImageWrapper(gym.Env):
+    def __init__(self, 
+        env,
+        init_state=None,
+        normalization_path=None,
+        render_obs_keys=['agentview_image', 'robot0_eye_in_hand_image'],
+        render_hw=(256, 256),
+        render_camera_name="agentview",
+        max_episode_length=None,
+        ):
+
+        self.env = env
+        self.render_obs_keys = render_obs_keys
+        self.init_state = init_state
+        self.render_hw = render_hw
+        self.render_camera_name = render_camera_name
+        self.video_writer = None
+        self.max_episode_length = max_episode_length
+        self.env_step = 0
+        self.n_episodes = 0
+
+        self.seed_state_map = dict()
+        self._seed = None
+        self.render_cache = {}
+        self.has_reset_before = False
+        
+        # setup spaces
+        low = np.full(env.action_dimension, fill_value=-1.)
+        high = np.full(env.action_dimension, fill_value=1.)
+        self.action_space = Box(
+            low=low,
+            high=high,
+            shape=low.shape,
+            dtype=low.dtype,
+        )
+
+        obs_example = self.get_observation()
+        observation_space = Dict()
+        for key, value in obs_example.items():
+            shape = value['shape']
+            min_value, max_value = -1, 1
+            if key.endswith('image'):
+                min_value, max_value = 0, 1
+            elif key.endswith('quat'):
+                min_value, max_value = -1, 1
+            elif key.endswith('qpos'):
+                min_value, max_value = -1, 1
+            elif key.endswith('pos'):
+                # better range?
+                min_value, max_value = -1, 1
+            else:
+                raise RuntimeError(f"Unsupported type {key}")
+            
+            this_space = Box(
+                low=min_value,
+                high=max_value,
+                shape=shape,
+                dtype=np.float32
+            )
+            observation_space[key] = this_space
+        self.observation_space = observation_space
+
+
+    def get_observation(self, raw_obs=None):
+        if raw_obs is None:
+            raw_obs = self.env.get_observation()
+        
+        for k in self.render_obs_keys:
+            self.render_cache[k] = raw_obs[k]
+
+        obs = dict()
+        for key in self.observation_space.keys():
+            obs[key] = raw_obs[key]
+        return obs
+
+    def seed(self, seed=None):
+        np.random.seed(seed=seed)
+        self._seed = seed
+    
+    def reset(self):
+        if self.init_state is not None:
+            if not self.has_reset_before:
+                # the env must be fully reset at least once to ensure correct rendering
+                self.env.reset()
+                self.has_reset_before = True
+
+            # always reset to the same state
+            # to be compatible with gym
+            raw_obs = self.env.reset_to({'states': self.init_state})
+        elif self._seed is not None:
+            # reset to a specific seed
+            seed = self._seed
+            if seed in self.seed_state_map:
+                # env.reset is expensive, use cache
+                raw_obs = self.env.reset_to({'states': self.seed_state_map[seed]})
+            else:
+                # robosuite's initializes all use numpy global random state
+                np.random.seed(seed=seed)
+                raw_obs = self.env.reset()
+                state = self.env.get_state()['states']
+                self.seed_state_map[seed] = state
+            self._seed = None
+        else:
+            # random reset
+            raw_obs = self.env.reset()
+
+        # return obs
+        obs = self.get_observation(raw_obs)
+        return obs
+    
+    def step(self, action):
+        raw_obs, reward, done, info = self.env.step(action)
+        obs = self.get_observation(raw_obs)
+        return obs, reward, done, info
+    
+    def render(self, mode='rgb_array'):
+        if self.render_cache is None:
+            raise RuntimeError('Must run reset or step before render.')
+        img = np.moveaxis(self.render_cache, 0, -1)
+        img = (img * 255).astype(np.uint8)
+        return img
 
 class RobomimicLowdimWrapper(gym.Env):
     """

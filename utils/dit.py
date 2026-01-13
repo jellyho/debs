@@ -543,7 +543,7 @@ class MFDiT_REAL(nn.Module):
         ]
     
     @nn.compact
-    def __call__(self, observations, actions=None, r=None, t=None, images=None, is_encoded=False, train=True):
+    def __call__(self, observations, actions=None, t=None, r=None,images=None, is_encoded=False, train=True):
         """
         Forward pass of DiT.
         observations: [..., obs_dim],

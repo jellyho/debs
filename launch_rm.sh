@@ -4,15 +4,15 @@
 export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_A6000,gigabyte_A6000,gigabyte_A5000'
 export QOS='big_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="RF_JIT_MF_TARGET"
-export MODEL="meanflowrf"
+export JOBNAME="MFQ_BC_MLP_jit_rm"
+export MODEL="meanflow"
 
-for mf_method in "mf" "imf"; do
+for mf_method in "jit"; do
     for latent in "sphere"; do
         for task in "can" "lift" "square"; do
             for seed in "100"; do
-                echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
-                sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_robomimic.sh ${task} ${MODEL} ${latent} 1.0 ${JOBNAME} ${seed} ${mf_method}
+                echo "${JOBNAME}_${task}_${latent}_${task}_${seed}"
+                sbatch --exclude=node19,node16 -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_robomimic.sh ${task} ${MODEL} ${latent} 1.0 ${JOBNAME} ${seed} ${mf_method}
             done
         done
     done

@@ -237,7 +237,7 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         # if self.config['noisy_latent_actor']:
         rng, x_rng = jax.random.split(rng, 2)
         e = sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim), self.config['latent_dist'])
-        print(self.config['ob_dims'], e.shape)
+        
         actions = self.network.select('onestep_actor')(
             observations, 
             e,
@@ -259,8 +259,11 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         noise,
     ):
         """Compute actions from the BC flow model using the Euler method."""
-        t = jnp.ones((*observation.shape[:-1], 1))
-        r = jnp.zeros((*observation.shape[:-1], 1))
+        # if self.config['encoder'] is not None:
+        #     observations = self.network.select('actor_bc_flow_encoder')(observations)
+
+        t = jnp.ones((*observation.shape[: -len(self.config['ob_dims'])], 1))
+        r = jnp.zeros((*observation.shape[: -len(self.config['ob_dims'])], 1))
         
         output = self.network.select('actor_bc_flow')(
             observation,

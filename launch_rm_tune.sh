@@ -1,0 +1,21 @@
+#! /bin/bash
+
+
+export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_A6000,gigabyte_A6000,gigabyte_A5000'
+export QOS='big_qos'
+export MUJOCO_GL='egl'
+export JOBNAME="QCFQL_DiT_rm"
+export MODEL="qcfql"
+
+for mf_method in "jit_mf"; do
+    for latent in "normal"; do
+        for task in "can" "lift" "square"; do
+            for seed in "100"; do
+                for alpha in "10000"; do
+                    echo "${JOBNAME}_${task}_${latent}_${task}_${seed}"
+                    sbatch --exclude=node19,node16 -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_robomimic.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${seed} ${mf_method}
+                done
+            done
+        done
+    done
+done

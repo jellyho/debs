@@ -24,13 +24,13 @@
 export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_A6000,gigabyte_A6000,gigabyte_A5000'
 export QOS='big_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="QCFMQL_VISUAL_TUNING"
-export MODEL="qcmfql"
+export JOBNAME="MFLDQL_VISUAL_TUNING"
+export MODEL="meanflowq"
 
 # "cube-double-play" "scene-play" "puzzle-3x3-play" "puzzle-4x4-play"; do
 # "normal"
 for task_num in "1"; do
-    for latent in "normal" "sphere"; do
+    for latent in "normal"; do
         for task in "cube-single-play" "cube-double-play" "scene-play" "puzzle-3x3-play" "puzzle-4x4-play"; do
             for seed in "100"; do
                 for alpha in "0.01" "0.03" "0.1" "0.3" "1.0" "3.0" "10.0" "30.0" "100.0" "300.0"; do

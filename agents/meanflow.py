@@ -44,25 +44,17 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
                 t - r, # This seems to work better
                 params=grad_params
             )
-        
-        def target_mean_flow_forward(z, t, r):
+        def mean_flow_jit_forward(z, t, r):
             # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
-            return self.network.select('target_actor_bc_flow')(
+            x_pred = self.network.select('actor_bc_flow')(
                 batch['observations'], 
                 z, 
-                t, 
-                t - r, # This seems to work better
-            )
-        
-        def mean_flow_forward_no_r(z, t):
-            # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
-            return self.network.select('actor_bc_flow')(
-                batch['observations'], 
-                z, 
-                t, 
-                t,
+                t - r, 
+                r,
                 params=grad_params
             )
+            u = (x_pred - z) / (1 - r)
+            return u
 
         ############################################
         if self.config['mf_method'] == 'jit_mf':
@@ -77,21 +69,6 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             err = u - u_tgt
             loss = adaptive_l2_loss(err)
         ############################################
-
-        elif self.config['mf_method'] == 'jit_mf_nor':
-            r = jnp.zeros_like(t)
-            x_pred, dxdt = jax.jvp(
-                mean_flow_forward_no_r, 
-                (z, t), 
-                (v, jnp.ones_like(t))
-            )
-            u, dudt = z - x_pred, v - dxdt
-            u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
-            u_tgt = jax.lax.stop_gradient(u_tgt)
-            err = u - u_tgt
-            loss = adaptive_l2_loss(err)
-
-        ############################################
         elif self.config['mf_method'] == 'mfql':
             g_pred, dgdt = jax.jvp(
                 mean_flow_forward, 
@@ -102,69 +79,20 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             g_tgt = jax.lax.stop_gradient(g_tgt)
             err = g_pred - g_tgt
             loss = adaptive_l2_loss(err)
-
-        elif self.config['mf_method'] == 'mfql_nor':
-            r = jnp.zeros_like(t)
-            g_pred, dgdt = jax.jvp(
-                mean_flow_forward_no_r, 
-                (z, t), 
-                (v, jnp.ones_like(t))
-            )
-            g_tgt = z + (t - r - 1) * v - (t - r) * dgdt
-            g_tgt = jax.lax.stop_gradient(g_tgt)
-            err = g_pred - g_tgt
-            loss = adaptive_l2_loss(err)
-
-        ############################################
-        elif self.config['mf_method'] == 'ximf':
-            x_pred = mean_flow_forward(z, t, r)
-            
-            # 2. JVP: Calculate time derivative of x_pred
-            # Tangents: z -> v (flow direction), t -> 1, r -> 0
-
-            x_pred, dxdt = jax.jvp(
-                mean_flow_forward, 
+        elif self.config['mf_method'] == 'jit':
+            u_pred, _ = jax.jvp(
+                mean_flow_jit_forward, 
                 (z, t, r), 
-                (v, jnp.ones_like(t), jnp.zeros_like(r))
+                (v, jnp.zeros_like(t), jnp.ones_like(r))
             )
-
-            X_est = x_pred + (t - r) * jax.lax.stop_gradient(dxdt)
-            X_tgt = x
-            
-            # 4. Loss Calculation
-            err = X_est - X_tgt
-            loss = adaptive_l2_loss(err)
-        elif self.config['mf_method'] == 'imf':
-            v_pred = mean_flow_forward(z, t, t)
-
-            u_pred, dudt = jax.jvp(
-                mean_flow_forward, 
-                (z, t, r), 
-                (v_pred, jnp.ones_like(t), jnp.zeros_like(r))
+            _, dudr = jax.jvp(
+                mean_flow_jit_forward,
+                (z, t, r),
+                (v, jnp.zeros_like(t), jnp.ones_like(r))
             )
-
-            X_est = u_pred + (t - r) * jax.lax.stop_gradient(dudt)
-            X_tgt = e - x
-
-            # 4. Loss Calculation
-            err = X_est - X_tgt
-            loss = adaptive_l2_loss(err)
-
-        elif self.config['mf_method'] == 'imf_nor':
-            r = jnp.zeros_like(t)
-            v_pred = mean_flow_forward(z, t, t)
-
-            u_pred, dudt = jax.jvp(
-                mean_flow_forward_no_r, 
-                (z, t), 
-                (v_pred, jnp.ones_like(t))
-            )
-
-            X_est = u_pred + (t - r) * jax.lax.stop_gradient(dudt)
-            X_tgt = e - x
-
-            # 4. Loss Calculation
-            err = X_est - X_tgt
+            u_tgt = v + jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudr
+            u_tgt = jax.lax.stop_gradient(u_tgt)
+            err = u_pred - u_tgt
             loss = adaptive_l2_loss(err)
         #########################################
 
@@ -197,7 +125,6 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             return agent.total_loss(batch, grad_params, rng=rng)
 
         new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
-        agent.target_update(new_network, 'actor_bc_flow')
         return agent.replace(network=new_network, rng=new_rng), info
 
     @jax.jit
@@ -257,17 +184,25 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         noise,
     ):
         """Compute actions from the BC flow model using the Euler method."""
-        if self.config['encoder'] is not None:
-            observation = self.network.select('actor_bc_flow_encoder')(observation)
+        t = jnp.ones((*observation.shape[: -len(self.config['ob_dims'])], 1))
+        r = jnp.zeros((*observation.shape[: -len(self.config['ob_dims'])], 1))
 
-        t = jnp.ones((*observation.shape[:-1], 1))
-        r = jnp.zeros((*observation.shape[:-1], 1))
-
-        output = self.network.select('actor_bc_flow')(observation, noise, t, t - r)
-        if self.config['mf_method'] == 'imf':
-            action = noise - jnp.clip(output, -1, 1)
+        if self.config['mf_method'] == 'jit':
+            output = self.network.select('actor_bc_flow')(
+                observation,
+                noise, 
+                t - r, 
+                r,
+            )
         else:
-            action = jnp.clip(output, -1, 1)
+            output = self.network.select('actor_bc_flow')(
+                observation,
+                noise, 
+                t, 
+                t - r
+            )
+        
+        action = jnp.clip(output, -1, 1)
         return action
 
     @classmethod
@@ -289,7 +224,6 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ex_times = ex_observations[..., :1]
         ob_dims = ex_observations.shape[-1:]
         action_dim = ex_actions.shape[-1]
         action_len = ex_actions.shape[1]
@@ -298,8 +232,8 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             ex_actions,
             (ex_actions.shape[0], -1)
         )
-        
         full_action_dim = full_actions.shape[-1]
+        ex_times = full_actions[..., :1]
 
         # Define encoders.
         encoders = dict()
@@ -331,7 +265,6 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
 
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, actor_input_shape),
-            target_actor_bc_flow=(copy.deepcopy(actor_bc_flow_def), actor_input_shape),
         )
 
         if encoders.get('actor_bc_flow') is not None:
@@ -352,7 +285,6 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         network = TrainState.create(network_def, network_params, tx=network_tx)
 
         params = network.params
-        params[f'modules_target_actor_bc_flow'] = params[f'modules_actor_bc_flow']
 
         config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim

@@ -10,6 +10,7 @@ import optax
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, Value
+from utils.dit import MFDiT_REAL
 
 class QCFQLAgent(flax.struct.PyTreeNode):
     """Flow Q-learning (FQL) agent with action chunking. 
@@ -247,6 +248,7 @@ class QCFQLAgent(flax.struct.PyTreeNode):
 
         ob_dims = ex_observations.shape[1:]
         action_dim = ex_actions.shape[-1]
+        action_len = ex_actions.shape[1]
 
         full_actions = jnp.reshape(
             ex_actions,
@@ -272,14 +274,25 @@ class QCFQLAgent(flax.struct.PyTreeNode):
             encoder=encoders.get('critic'),
         )
 
-        actor_bc_flow_def = ActorVectorField(
-            hidden_dims=config['actor_hidden_dims'],
-            action_dim=full_action_dim,
-            layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_bc_flow'),
-            use_fourier_features=config["use_fourier_features"],
-            fourier_feature_dim=config["fourier_feature_dim"],
-        )
+        if config['use_DiT']:
+            actor_bc_flow_def = MFDiT_REAL(
+                hidden_dim=256,
+                depth=3,
+                num_heads=2,
+                output_dim=action_dim,  
+                output_len=action_len,
+                use_r=False,
+                encoders=None,
+            )
+        else:
+            actor_bc_flow_def = ActorVectorField(
+                hidden_dims=config['actor_hidden_dims'],
+                action_dim=full_action_dim,
+                layer_norm=config['actor_layer_norm'],
+                encoder=encoders.get('actor_bc_flow'),
+                use_fourier_features=config["use_fourier_features"],
+                fourier_feature_dim=config["fourier_feature_dim"],
+            )
         actor_onestep_flow_def = ActorVectorField(
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
@@ -343,9 +356,11 @@ def get_config():
             fourier_feature_dim=64,
             weight_decay=0.,
             latent_dist='uniform',
+            use_DiT=False,
 
             ####### Unused parameters for compatibility #######
             extract_method="unused",
+            mf_method="unused",
             flow_ratio=0.25,
         )
     )
