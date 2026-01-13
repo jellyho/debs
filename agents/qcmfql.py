@@ -237,11 +237,13 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         # if self.config['noisy_latent_actor']:
         rng, x_rng = jax.random.split(rng, 2)
         e = sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim), self.config['latent_dist'])
+        print(self.config['ob_dims'], e.shape)
         actions = self.network.select('onestep_actor')(
             observations, 
             e,
             is_encoded=False
         )
+        actions = jnp.clip(actions, -1, 1)
         actions = jnp.reshape(
             actions, 
             (*observations.shape[: -len(self.config['ob_dims'])],  # batch_size
@@ -289,8 +291,7 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ex_times = ex_observations[..., :1]
-        ob_dims = ex_observations.shape[-1:]
+        ob_dims = ex_observations.shape[1:]
         action_dim = ex_actions.shape[-1]
         
         # full_actions = jnp.concatenate([ex_actions] * config["horizon_length"], axis=-1)

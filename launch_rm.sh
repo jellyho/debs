@@ -4,10 +4,10 @@
 export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_A6000,gigabyte_A6000,gigabyte_A5000'
 export QOS='big_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="LQL_MLP_DiT_trhalf_chunk10"
-export MODEL="meanflowq"
+export JOBNAME="RF_JIT_MF_TARGET"
+export MODEL="meanflowrf"
 
-for mf_method in "jit_mf"; do
+for mf_method in "mf" "imf"; do
     for latent in "sphere"; do
         for task in "can" "lift" "square"; do
             for seed in "100"; do

@@ -371,8 +371,8 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ex_times = ex_observations[..., :1]
-        ob_dims = ex_observations.shape[-1:]
+        
+        ob_dims = ex_observations.shape[1:]
         action_dim = ex_actions.shape[-1]
         action_len = ex_actions.shape[1]
         
@@ -381,6 +381,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             (ex_actions.shape[0], -1)
         )
         full_action_dim = full_actions.shape[-1]
+        ex_times = full_actions[..., :1]
 
         # Define encoders.
         encoders = dict()

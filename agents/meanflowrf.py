@@ -13,7 +13,7 @@ from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorMeanFlowField
 from utils.dit import MFDiT_REAL
 
-class MEANFLOWAgent(flax.struct.PyTreeNode):
+class MEANFLOWRFAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
     """
     rng: Any
@@ -29,143 +29,64 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         # BC mean flow loss.
         x = batch_actions
         t, r = sample_t_r(batch_size, t_rng, self.config['flow_ratio'])
+        r = jnp.clip(r, a_min=0.0, a_max=0.9999)
 
         ##### It does not need to be normal distirbution
         e = sample_latent_dist(x_rng, (batch_size, action_dim), self.config['latent_dist'])
-        z = (1 - t) * x + t * e
-        v = e - x
+        z = r * x + (1 - r) * e
+        v = x - e
 
         def mean_flow_forward(z, t, r):
             # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
-            return self.network.select('actor_bc_flow')(
+            x_pred = self.network.select('actor_bc_flow')(
                 batch['observations'], 
                 z, 
-                t, 
-                t - r, # This seems to work better
+                t - r, 
+                r,
                 params=grad_params
             )
+            u = (x_pred - z) / (1 - r)
+            return u
         
         def target_mean_flow_forward(z, t, r):
             # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
-            return self.network.select('target_actor_bc_flow')(
+            x_pred = self.network.select('target_actor_bc_flow')(
                 batch['observations'], 
                 z, 
-                t, 
-                t - r, # This seems to work better
+                t - r, 
+                r,
             )
-        
-        def mean_flow_forward_no_r(z, t):
-            # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
-            return self.network.select('actor_bc_flow')(
-                batch['observations'], 
-                z, 
-                t, 
-                t,
-                params=grad_params
-            )
-
+            u = (x_pred - z) / (1 - r)
+            return u
         ############################################
-        if self.config['mf_method'] == 'jit_mf':
-            x_pred, dxdt = jax.jvp(
+
+        if self.config['mf_method'] == 'mf':
+            u_pred, _ = jax.jvp(
                 mean_flow_forward, 
                 (z, t, r), 
-                (v, jnp.ones_like(t), jnp.zeros_like(r))
+                (v, jnp.zeros_like(t), jnp.ones_like(r))
             )
-            u, dudt = z - x_pred, v - dxdt
-            u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
+            _, dudr = jax.jvp(
+                target_mean_flow_forward,
+                (z, t, r),
+                (v, jnp.zeros_like(t), jnp.ones_like(r))
+            )
+            u_tgt = v + jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudr
             u_tgt = jax.lax.stop_gradient(u_tgt)
-            err = u - u_tgt
-            loss = adaptive_l2_loss(err)
-        ############################################
-
-        elif self.config['mf_method'] == 'jit_mf_nor':
-            r = jnp.zeros_like(t)
-            x_pred, dxdt = jax.jvp(
-                mean_flow_forward_no_r, 
-                (z, t), 
-                (v, jnp.ones_like(t))
-            )
-            u, dudt = z - x_pred, v - dxdt
-            u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudt
-            u_tgt = jax.lax.stop_gradient(u_tgt)
-            err = u - u_tgt
-            loss = adaptive_l2_loss(err)
-
-        ############################################
-        elif self.config['mf_method'] == 'mfql':
-            g_pred, dgdt = jax.jvp(
-                mean_flow_forward, 
-                (z, t, r), 
-                (v, jnp.ones_like(t), jnp.zeros_like(r))
-            )
-            g_tgt = z + (t - r - 1) * v - (t - r) * dgdt
-            g_tgt = jax.lax.stop_gradient(g_tgt)
-            err = g_pred - g_tgt
-            loss = adaptive_l2_loss(err)
-
-        elif self.config['mf_method'] == 'mfql_nor':
-            r = jnp.zeros_like(t)
-            g_pred, dgdt = jax.jvp(
-                mean_flow_forward_no_r, 
-                (z, t), 
-                (v, jnp.ones_like(t))
-            )
-            g_tgt = z + (t - r - 1) * v - (t - r) * dgdt
-            g_tgt = jax.lax.stop_gradient(g_tgt)
-            err = g_pred - g_tgt
-            loss = adaptive_l2_loss(err)
-
-        ############################################
-        elif self.config['mf_method'] == 'ximf':
-            x_pred = mean_flow_forward(z, t, r)
-            
-            # 2. JVP: Calculate time derivative of x_pred
-            # Tangents: z -> v (flow direction), t -> 1, r -> 0
-
-            x_pred, dxdt = jax.jvp(
-                mean_flow_forward, 
-                (z, t, r), 
-                (v, jnp.ones_like(t), jnp.zeros_like(r))
-            )
-
-            X_est = x_pred + (t - r) * jax.lax.stop_gradient(dxdt)
-            X_tgt = x
-            
-            # 4. Loss Calculation
-            err = X_est - X_tgt
+            err = u_pred - u_tgt
             loss = adaptive_l2_loss(err)
         elif self.config['mf_method'] == 'imf':
-            v_pred = mean_flow_forward(z, t, t)
-
-            u_pred, dudt = jax.jvp(
-                mean_flow_forward, 
-                (z, t, r), 
-                (v_pred, jnp.ones_like(t), jnp.zeros_like(r))
+            u_pred = mean_flow_forward(z, t, r) # ~ v_pred
+            _, dudr = jax.jvp(
+                target_mean_flow_forward,
+                (z, t, r),
+                (v, jnp.zeros_like(t), jnp.ones_like(r))
             )
-
-            X_est = u_pred + (t - r) * jax.lax.stop_gradient(dudt)
-            X_tgt = e - x
-
-            # 4. Loss Calculation
-            err = X_est - X_tgt
-            loss = adaptive_l2_loss(err)
-
-        elif self.config['mf_method'] == 'imf_nor':
-            r = jnp.zeros_like(t)
-            v_pred = mean_flow_forward(z, t, t)
-
-            u_pred, dudt = jax.jvp(
-                mean_flow_forward_no_r, 
-                (z, t), 
-                (v_pred, jnp.ones_like(t))
-            )
-
-            X_est = u_pred + (t - r) * jax.lax.stop_gradient(dudt)
-            X_tgt = e - x
-
-            # 4. Loss Calculation
-            err = X_est - X_tgt
-            loss = adaptive_l2_loss(err)
+            V = u_pred - (t - r) * jax.lax.stop_gradient(dudr)
+            err = V - v
+            # loss = adaptive_l2_loss(err)
+            loss = jnp.mean(jnp.square(V - v))
+        ############################################
         #########################################
 
         return loss, {
@@ -263,11 +184,8 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         t = jnp.ones((*observation.shape[:-1], 1))
         r = jnp.zeros((*observation.shape[:-1], 1))
 
-        output = self.network.select('actor_bc_flow')(observation, noise, t, t - r)
-        if self.config['mf_method'] == 'imf':
-            action = noise - jnp.clip(output, -1, 1)
-        else:
-            action = jnp.clip(output, -1, 1)
+        output = self.network.select('actor_bc_flow')(observation, noise, t - r, r)
+        action = jnp.clip(output, -1, 1)
         return action
 
     @classmethod
@@ -400,7 +318,7 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='meanflow',  # Agent name.
+            agent_name='meanflowrf',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
@@ -417,10 +335,13 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
-            flow_ratio=0.1,
+            flow_ratio=0.25,
             latent_dist='normal',
             use_DiT=False,
-            mf_method='mf'
+            mf_method='mf',
+
+            ###### unused
+            alpha=1.0
         )
     )
     return config

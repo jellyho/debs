@@ -7,6 +7,7 @@ from agents.flow import FLOWAgent
 from agents.fmlql import FMLQLAgent
 from agents.meanflow_robot import MEANFLOWROBOTAgent
 from agents.cfm import ConsistencyFlowAgent
+from agents.meanflowrf import MEANFLOWRFAgent
 agents = dict(
     qcfql=QCFQLAgent,
     fmlql=FMLQLAgent,
@@ -15,5 +16,6 @@ agents = dict(
     flow=FLOWAgent,
     meanflow=MEANFLOWAgent,
     meanflow_robot=MEANFLOWROBOTAgent,
-    cfm=ConsistencyFlowAgent
+    cfm=ConsistencyFlowAgent,
+    meanflowrf=MEANFLOWRFAgent,
 )

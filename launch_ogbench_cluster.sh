@@ -27,25 +27,25 @@
 export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_A6000,gigabyte_A6000,ASUS_RTX6000ADA,TYAN_A6000,gigabyte_A5000,ASUS_A5000'
 export QOS='big_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="FMLQL_RM"
-export MODEL="fmlql"
+export JOBNAME="ACFQLFINAL_BIG"
+export MODEL="qclql"
 
-# for task_num in "1" "2" "3" "4" "5"; do
-#     for latent in "sphere" "normal"; do
-#         for task in "cube-single-play" "cube-double-play" "scene-play" "puzzle-3x3-play" "puzzle-4x4-play"; do
-#             for seed in "100" "200" "300"; do
-#                 echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
-#                 sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_ogbench.sh ${task} ${MODEL} ${latent} 1.0 ${JOBNAME} ${task_num} ${seed}
-#             done
-#         done
-#     done
-# done
-
-for latent in "sphere"; do
-    for task in "lift" "can" "square"; do
-        for seed in "100"; do
-            echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
-            sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_robomimic.sh ${task} ${MODEL} ${latent} 1.0 ${JOBNAME} ${seed}
+for task_num in "1" "2" "3" "4" "5"; do
+    for latent in "sphere" "normal"; do
+        for task in "cube-single-play" "cube-double-play" "scene-play" "puzzle-3x3-play" "puzzle-4x4-play"; do
+            for seed in "100" "200" "300"; do
+                echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+                sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+            done
         done
     done
 done
+
+# for latent in "sphere"; do
+#     for task in "lift" "can" "square"; do
+#         for seed in "100"; do
+#             echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+#             sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_robomimic.sh ${task} ${MODEL} ${latent} 1.0 ${JOBNAME} ${seed}
+#         done
+#     done
+# done

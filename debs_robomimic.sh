@@ -9,7 +9,7 @@ python main.py \
     --run_group "$2:$5" \
     --task_name $1 \
     --env_name "$1-mh-low_dim" \
-    --horizon_length 10 \
+    --horizon_length 5 \
     --agent.lr 3e-4 \
     --eval_interval 100000 \
     --eval_episodes 50 \
@@ -20,7 +20,8 @@ python main.py \
     --agent.latent_dist "$3" \
     --seed $6 \
     --agent.mf_method $7 \
-    --agent.use_DiT
+    --agent.flow_ratio 0.25 \
+    # --agent.use_DiT
     # --agent.alpha $4 \
     
     # --agent.extract_method "ddpg" \
