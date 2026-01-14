@@ -21,8 +21,10 @@ python main.py \
     --seed $6 \
     --agent.mf_method $7 \
     --agent.flow_ratio 0.25 \
+    --agent.alpha $4 \
     # --agent.use_DiT
-    # --agent.alpha $4 \
+    
+    
     
     # --agent.extract_method "ddpg" \
     # --agent.use_DiT

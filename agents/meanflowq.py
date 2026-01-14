@@ -77,11 +77,14 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
 
         ##### It does not need to be normal distirbution
         e = sample_latent_dist(x_rng, (batch_size, action_dim), self.config['latent_dist'])
-        z = (1 - t) * x + t * e
-        v = e - x
+        if self.config['mf_method'] in ['jit_mf', 'mfql']:
+            z = (1 - t) * x + t * e
+            v = e - x
+        else:
+            z = r * x + (1 - r) * e
+            v = x - e
 
         def mean_flow_forward(z, t, r):
-            # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
             return self.network.select('actor_bc_flow')(
                 batch['observations'], 
                 z, 
@@ -90,7 +93,6 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
                 params=grad_params
             )
         def mean_flow_jit_forward(z, t, r):
-            # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
             x_pred = self.network.select('actor_bc_flow')(
                 batch['observations'], 
                 z, 
@@ -129,14 +131,9 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
 
         ############################################
         elif self.config['mf_method'] == 'jit':
-            u_pred, _ = jax.jvp(
+            u_pred, dudr = jax.jvp(
                 mean_flow_jit_forward, 
                 (z, t, r), 
-                (v, jnp.zeros_like(t), jnp.ones_like(r))
-            )
-            _, dudr = jax.jvp(
-                mean_flow_jit_forward,
-                (z, t, r),
                 (v, jnp.zeros_like(t), jnp.ones_like(r))
             )
             u_tgt = v + jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudr
@@ -170,8 +167,8 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
                 rng=l_rng,
                 params=grad_params # <--- Gradients flow here
             )
-            e = sample_latent_dist(e_rng, (batch_size, latent_dim), 'normal')
-            z_pred = z_pred #+ 0.1 * e  # add small noise for better exploration
+            # e = sample_latent_dist(e_rng, (batch_size, latent_dim), 'normal')
+            # z_pred = z_pred #+ 0.1 * e  # add small noise for better exploration
 
 
         if self.config['extract_method'] in ['onestep_ddpg']:
@@ -181,6 +178,8 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             x_pred = self.compute_flow_actions(observations, z_pred)
 
         a_pred_flat = jnp.reshape(x_pred, (batch_size, latent_dim))
+        ## STE
+        # a_pred_flat = z_pred -  jax.lax.stop_gradient((z_pred - jnp.reshape(x_pred, (batch_size, latent_dim))))
 
         info_dict = {
             'z_norm': jnp.mean(jnp.square(z_pred)),
@@ -387,8 +386,8 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         if config['encoder'] is not None:
             encoder_module = encoder_modules[config['encoder']]
             encoders['critic'] = encoder_module()
-            encoders['value'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()
+            encoders['latent_actor'] = encoder_module()
 
         critic_def = Value(
             hidden_dims=config['critic_hidden_dims'],
@@ -421,7 +420,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             hidden_dims=config['latent_actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_bc_flow'),
+            encoder=encoders.get('latent_actor'),
             latent_dist=config['latent_dist']
         )
 
@@ -449,6 +448,10 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         if config["weight_decay"] > 0.:
             network_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
         else:
+            # network_tx = optax.chain(
+            #     optax.clip_by_global_norm(10.0),
+            #     optax.adam(learning_rate=config['lr'])
+            # )
             network_tx = optax.adam(learning_rate=config['lr'])
 
         network_params = network_def.init(init_rng, **network_args)['params']
@@ -472,7 +475,7 @@ def get_config():
             lr=3e-4,  # Learning rate.
             batch_size=256,  # Batch size.
             actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
-            critic_hidden_dims=(256, 256, 256, 256),  # Value network hidden dimensions.
+            critic_hidden_dims=(512, 512, 512, 512),  # Value network hidden dimensions.
             latent_actor_hidden_dims=(256, 256),
             layer_norm=True,  # Whether to use layer normalization.
             actor_layer_norm=False,  # Whether to use layer normalization for the actor.

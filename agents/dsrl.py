@@ -22,34 +22,38 @@ class DSRLAgent(flax.struct.PyTreeNode):
     def critic_loss(self, batch, grad_params, rng):
         """Compute the FQL critic loss."""
         batch_size = batch['actions'].shape[0]
-
-        # if self.config["action_chunking"]:
         batch_actions = jnp.reshape(batch["actions"], (batch_size, -1))
         
         # TD loss
-        rng, sample_rng = jax.random.split(rng)
+        rng, sample_rng = jax.random.split(rng, 2)
         next_actions = self.sample_actions(batch['next_observations'], rng=sample_rng)
 
         next_qs = self.network.select(f'target_critic')(
             batch['next_observations'], 
             actions=next_actions.reshape(batch_size, -1)
         )
-        if self.config['critic_agg'] == 'min':
-            next_q = next_qs.min(axis=0)
+
+        if self.config['num_critic'] > 1:
+            if self.config['critic_agg'] == 'min':
+                next_q = jnp.min(next_qs, axis=0)
+            else:
+                next_q = jnp.mean(next_qs, axis=0)
         else:
-            next_q = next_qs.mean(axis=0)
+            next_q = next_qs
         
-        target_q = batch['rewards'] + \
-            (self.config['discount'] ** self.config["horizon_length"]) * batch['masks'] * next_q
-
-
-        q = self.network.select('critic')(
+        qs = self.network.select('critic')(
             batch['observations'], 
             actions=batch_actions, 
             params=grad_params
         )
+
+        target_q = batch['rewards'] + \
+            (self.config['discount'] ** self.config["horizon_length"]) * batch['masks'] * next_q
+
         
-        critic_loss = (jnp.square(q - target_q)).mean()
+        critic_loss = (jnp.square(qs - jnp.broadcast_to(target_q, qs.shape))).mean()
+
+        q = qs.mean(axis=0) # For logging
 
         return critic_loss, {
             'critic_loss': critic_loss,
@@ -91,48 +95,11 @@ class DSRLAgent(flax.struct.PyTreeNode):
         )
 
         bc_flow_loss = jnp.mean(jnp.square(pred - vel))
-
-        # Distillation loss.
-        rng, noise_rng = jax.random.split(rng)
-        noises = self.sample_latent_dist(noise_rng, (batch_size, action_dim))
-        target_flow_actions = self.compute_flow_actions(
-            batch['observations'], 
-            noises=noises
-        )
-        actor_actions = self.network.select('actor_onestep_flow')(
-            batch['observations'], 
-            noises, 
-            params=grad_params
-        )
-
-        distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
-        # Q loss.
-        actor_actions = jnp.clip(actor_actions, -1, 1)
-        qs = self.network.select(f'critic')(
-            batch['observations'], 
-            actions=actor_actions
-        )
-        q = jnp.mean(qs, axis=0)
-        q_loss = -q.mean()
-        lam = jax.lax.stop_gradient(1 / jnp.abs(q).mean())
-        q_loss = lam * q_loss
-
         # Total loss.
-        actor_loss = bc_flow_loss + distill_loss * self.config['alpha'] + q_loss
-
-        # Critic distillation
-        qs_noise = self.network.select(f'noise_critic')(
-            batch['observations'],
-            actions=actor_actions,
-            params=grad_params
-        )
-        noise_critic_loss = jnp.mean((qs_noise - jnp.reshape(q, qs_noise.shape)) ** 2)
+        actor_loss = bc_flow_loss
 
         return actor_loss, {
             'actor_loss': actor_loss,
-            'bc_flow_loss': bc_flow_loss,
-            'distill_loss': distill_loss,
-            'critic_distill_loss' : noise_critic_loss,
         }
     
     @jax.jit
@@ -142,6 +109,58 @@ class DSRLAgent(flax.struct.PyTreeNode):
         rng=None,
     ):
         return jnp.zeros_like(observations)
+    
+    def latent_actor_loss(self, batch, grad_params, rng):
+        observations = batch['observations']
+        batch_size = observations.shape[0]
+        latent_dim = self.config['action_dim'] * self.config['horizon_length']
+        
+        ### Query latent actor
+        rng, x_rng, l_rng = jax.random.split(rng, 3)
+        e = self.sample_latent_dist(x_rng, (batch_size, latent_dim))
+        z_pred = self.network.select('latent_actor')(
+            observations, 
+            e,
+            rng=l_rng,
+            params=grad_params # <--- Gradients flow here
+        )
+        x_pred = self.compute_flow_actions(observations, e)
+        a_pred_flat = jnp.reshape(x_pred, (batch_size, latent_dim))
+
+        info_dict = {
+            'z_norm': jnp.mean(jnp.square(z_pred)),
+        }
+
+        # Q(s, a)
+        qs = self.network.select('critic')(
+            observations,
+            a_pred_flat.reshape(batch_size, -1)
+        )
+
+        if self.config['num_critic'] > 1:
+            q = jnp.mean(qs, axis=0)
+        else:
+            q = qs
+
+        q_loss = -q.mean()
+        lam = jax.lax.stop_gradient(1 / jnp.abs(q).mean())
+        q_loss = self.config['alpha'] * lam * q_loss
+        info_dict['latent_loss'] = q_loss
+
+        # Noise Aliasing
+
+        noise_qs = self.network.select('noise_critic')(
+            observations,
+            e,
+            params=grad_params
+        )
+        alias_loss = jnp.mean(jnp.square((noise_qs - q)))
+
+        info_dict['alias_loss'] = alias_loss
+
+        loss = q_loss + alias_loss
+
+        return loss, info_dict
 
     @jax.jit
     def total_loss(self, batch, grad_params, rng=None):
@@ -149,7 +168,7 @@ class DSRLAgent(flax.struct.PyTreeNode):
         info = {}
         rng = rng if rng is not None else self.rng
 
-        rng, actor_rng, critic_rng = jax.random.split(rng, 3)
+        rng, actor_rng, critic_rng, latent_rng = jax.random.split(rng, 4)
 
         critic_loss, critic_info = self.critic_loss(batch, grad_params, critic_rng)
         for k, v in critic_info.items():
@@ -159,7 +178,11 @@ class DSRLAgent(flax.struct.PyTreeNode):
         for k, v in actor_info.items():
             info[f'actor/{k}'] = v
 
-        loss = critic_loss + actor_loss
+        latent_loss, latent_info = self.latent_actor_loss(batch, grad_params, latent_rng)
+        for k, v in latent_info.items():
+            info[f'latent/{k}'] = v
+
+        loss = critic_loss + actor_loss + latent_loss
         return loss, info
 
     def target_update(self, network, module_name):
@@ -203,18 +226,17 @@ class DSRLAgent(flax.struct.PyTreeNode):
         latent_dim = self.config["horizon_length"] * self.config["action_dim"]
         rng, x_rng = jax.random.split(rng, 2)
         e = self.sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim))
-        actions = self.network.select(f'actor_onestep_flow')(
+        noises = self.network.select('latent_actor')(
             observations, 
             e,
-            is_encoded=False
         )
-
-        actions = jnp.clip(actions, -1, 1)
+        actions = self.compute_flow_actions(observations, noises)
         actions = jnp.reshape(
             actions, 
             (*observations.shape[: -len(self.config['ob_dims'])],  # batch_size
             self.config["horizon_length"], self.config["action_dim"])
         )
+        actions = jnp.clip(actions, -1, 1)
         return actions
 
     @jax.jit
@@ -254,7 +276,8 @@ class DSRLAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ob_dims = ex_observations.shape[1:]
+        ex_times = ex_observations[..., :1]
+        ob_dims = ex_observations.shape[-1:]
         action_dim = ex_actions.shape[-1]
 
         full_actions = jnp.reshape(
@@ -262,16 +285,14 @@ class DSRLAgent(flax.struct.PyTreeNode):
             (ex_actions.shape[0], -1)
         )
         full_action_dim = full_actions.shape[-1]
-        ex_times = full_actions[..., :1]
 
         # Define encoders.
         encoders = dict()
         if config['encoder'] is not None:
             encoder_module = encoder_modules[config['encoder']]
             encoders['critic'] = encoder_module()
-            encoders['noise_critic'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()
-            encoders['actor_onestep_flow'] = encoder_module()
+            encoders['latent_actor'] = encoder_module()
 
         # Define networks.
         critic_def = Value(
@@ -293,23 +314,26 @@ class DSRLAgent(flax.struct.PyTreeNode):
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
             encoder=encoders.get('actor_bc_flow'),
-            use_fourier_features=config["use_fourier_features"],
-            fourier_feature_dim=config["fourier_feature_dim"],
         )
-        actor_onestep_flow_def = ActorVectorField(
+
+        latent_actor_def = ActorVectorField(
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_onestep_flow'),
+            encoder=encoders.get('latent_actor'),
+            latent_dist=config['latent_dist']
         )
+
+        latent_actor_input_shape = (ex_observations, full_actions)
 
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
-            actor_onestep_flow=(actor_onestep_flow_def, (ex_observations, full_actions)),
+            latent_actor=(latent_actor_def, latent_actor_input_shape),
             critic=(critic_def, (ex_observations, full_actions)),
-            target_critic=(copy.deepcopy(critic_def), (ex_observations, full_actions)),
             noise_critic=(noise_critic_def, (ex_observations, full_actions)),
+            target_critic=(copy.deepcopy(critic_def), (ex_observations, full_actions)),
         )
+
         if encoders.get('actor_bc_flow') is not None:
             # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
             network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
@@ -339,13 +363,14 @@ class DSRLAgent(flax.struct.PyTreeNode):
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='qcfql',  # Agent name.
+            agent_name='dsrl',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
             batch_size=256,  # Batch size.
             actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
             value_hidden_dims=(256, 256, 256, 256),  # Value network hidden dimensions.
+            latent_actor_hidden_dims=(256, 256),
             layer_norm=True,  # Whether to use layer normalization.
             actor_layer_norm=False,  # Whether to use layer normalization for the actor.
             discount=0.99,  # Discount factor.
@@ -360,10 +385,11 @@ def get_config():
             fourier_feature_dim=64,
             weight_decay=0.,
             latent_dist='uniform',
+            extract_method='ddpg', # 'ddpg', 'awr',,
 
-            ####### Unused parameters for compatibility #######
-            extract_method="unused",
-            flow_ratio=0.25,
+            ## unsued
+            mf_method='unused',
+            
         )
     )
     return config

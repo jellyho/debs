@@ -32,8 +32,13 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
 
         ##### It does not need to be normal distirbution
         e = sample_latent_dist(x_rng, (batch_size, action_dim), self.config['latent_dist'])
-        z = (1 - t) * x + t * e
-        v = e - x
+
+        if self.config['mf_method'] in ['jit_mf', 'mfql']:
+            z = (1 - t) * x + t * e
+            v = e - x
+        else:
+            z = r * x + (1 - r) * e
+            v = x - e
 
         def mean_flow_forward(z, t, r):
             # Network 입력 순서에 맞춰서 호출 (Obs, Z, T, R)
@@ -80,14 +85,9 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             err = g_pred - g_tgt
             loss = adaptive_l2_loss(err)
         elif self.config['mf_method'] == 'jit':
-            u_pred, _ = jax.jvp(
+            u_pred, dudr = jax.jvp(
                 mean_flow_jit_forward, 
                 (z, t, r), 
-                (v, jnp.zeros_like(t), jnp.ones_like(r))
-            )
-            _, dudr = jax.jvp(
-                mean_flow_jit_forward,
-                (z, t, r),
                 (v, jnp.zeros_like(t), jnp.ones_like(r))
             )
             u_tgt = v + jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudr
@@ -279,7 +279,10 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         if config["weight_decay"] > 0.:
             network_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
         else:
-            network_tx = optax.adam(learning_rate=config['lr'])
+            network_tx = optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.adam(learning_rate=config['lr'])
+            )
 
         network_params = network_def.init(init_rng, **network_args)['params']
         network = TrainState.create(network_def, network_params, tx=network_tx)
@@ -352,7 +355,11 @@ def get_config():
             flow_ratio=0.1,
             latent_dist='normal',
             use_DiT=False,
-            mf_method='mf'
+            mf_method='mf',
+
+            ######### unused
+            alpha=1.0,
+            extract_method='unused'
         )
     )
     return config

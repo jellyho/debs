@@ -22,7 +22,8 @@ python main.py \
     --seed $7 \
     --agent.encoder "impala_small" \
     --p_aug=0.5 \
-    --agent.extract_method "onestep_ddpg" \
+    --agent.extract_method "ddpg" \
+    --agent.mf_method "jit_mf"
     
     # --agent.weight_decay 0.1 \
 

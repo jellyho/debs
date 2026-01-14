@@ -139,6 +139,7 @@ def main(_):
         
         if is_robomimic_env(FLAGS.env_name):
             penalty_rewards = dataset["rewards"] - 1.0
+            
             ds_dict = {k: v for k, v in dataset.items()}
             ds_dict["rewards"] = penalty_rewards
             dataset = Dataset.create(**ds_dict)
@@ -152,7 +153,7 @@ def main(_):
 
         dataset.actor_action_sequence = ( FLAGS.horizon_length )
         dataset.critic_action_sequence = ( FLAGS.horizon_length )
-        dataset.nstep = 1
+        dataset.nstep = 1 # Actually N step
         dataset.discount = FLAGS.discount
         dataset.discount2 = FLAGS.discount
         dataset.p_aug = FLAGS.p_aug
@@ -160,6 +161,7 @@ def main(_):
     
     train_dataset = process_train_dataset(train_dataset)
     example_batch = train_dataset.sample(config['batch_size'])
+    print(example_batch['rewards'].mean(), example_batch['rewards'].min(), example_batch['rewards'].max())
 
     for k, v in example_batch.items():
         try:
