@@ -136,9 +136,14 @@ class Dataset(FrozenDict):
             total_steps = self.nstep * self.critic_action_sequence
 
             # Get final next observations
-            batch['next_observations'] = self._dict['next_observations'][
-                np.minimum(idxs + total_steps - 1, next_episode_starts)
-            ]
+            next_obs_idxs = np.minimum(idxs + total_steps - 1, next_episode_starts)
+            batch['next_observations'] = jax.tree_util.tree_map(
+                lambda arr: arr[next_obs_idxs], 
+                self._dict['next_observations']
+            )
+            # batch['next_observations'] = self._dict['next_observations'][
+            #     np.minimum(idxs + total_steps - 1, next_episode_starts)
+            # ]
 
         batch['valid'] = np.ones_like(batch['masks'])
 
@@ -203,7 +208,8 @@ class Dataset(FrozenDict):
     def augment(self, batch, keys):
         """Apply image augmentation to the given keys."""
         padding = 3
-        batch_size = len(batch[keys[0]])
+        batch_size = get_size(batch[keys[0]])
+        # batch_size = len(batch[keys[0]])
         crop_froms = np.random.randint(0, 2 * padding + 1, (batch_size, 2))
         crop_froms = np.concatenate([crop_froms, np.zeros((batch_size, 1), dtype=np.int64)], axis=1)
         for key in keys:
