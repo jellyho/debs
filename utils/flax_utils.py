@@ -84,15 +84,19 @@ class TrainState(flax.struct.PyTreeNode):
     model_def: Any = nonpytree_field()
     params: Any
     tx: Any = nonpytree_field()
+    batch_stats: Any = nonpytree_field()
     opt_state: Any
 
     @classmethod
-    def create(cls, model_def, params, tx=None, **kwargs):
+    def create(cls, model_def, params, tx=None, batch_stats=None, **kwargs):
         """Create a new train state."""
         if tx is not None:
             opt_state = tx.init(params)
         else:
             opt_state = None
+
+        if batch_stats is None:
+            batch_stats = flax.core.FrozenDict({})
 
         return cls(
             step=1,
@@ -101,10 +105,11 @@ class TrainState(flax.struct.PyTreeNode):
             params=params,
             tx=tx,
             opt_state=opt_state,
+            batch_stats=batch_stats,
             **kwargs,
         )
 
-    def __call__(self, *args, params=None, method=None, **kwargs):
+    def __call__(self, *args, params=None, method=None, batch_stats=None, **kwargs):
         """Forward pass.
 
         When `params` is not provided, it uses the stored parameters.
@@ -122,27 +127,34 @@ class TrainState(flax.struct.PyTreeNode):
         """
         if params is None:
             params = self.params
-        variables = {'params': params}
+
+        if batch_stats is None:
+            batch_stats = self.batch_stats
+
+        variables = {'params': params, 'batch_stats': batch_stats}
+
         if method is not None:
             method_name = getattr(self.model_def, method)
         else:
             method_name = None
 
-        return self.apply_fn(variables, *args, method=method_name, **kwargs)
+        return self.apply_fn(variables, *args, method=method_name, mutable=False, **kwargs)
 
     def select(self, name):
         """Helper function to select a module from a `ModuleDict`."""
         return functools.partial(self, name=name)
 
-    def apply_gradients(self, grads, **kwargs):
+    def apply_gradients(self, grads, new_batch_stats=None, **kwargs):
         """Apply the gradients and return the updated state."""
         updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
         new_params = optax.apply_updates(self.params, updates)
+        new_stats = new_batch_stats if new_batch_stats is not None else self.batch_stats
 
         return self.replace(
             step=self.step + 1,
             params=new_params,
             opt_state=new_opt_state,
+            batch_stats=new_stats,
             **kwargs,
         )
 

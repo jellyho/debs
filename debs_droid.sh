@@ -12,10 +12,10 @@ python main.py \
     --env_name "$1" \
     --horizon_length 5 \
     --agent.lr 3e-4 \
-    --eval_interval 100000 \
+    --eval_interval 10000 \
     --eval_episodes 50 \
     --video_episodes 10 \
-    --offline_steps 1000000 \
+    --offline_steps 10000 \
     --save_dir "exp/" \
     --agent.num_critic 2 \
     --agent.latent_dist "$3" \
@@ -26,6 +26,7 @@ python main.py \
     --agent.encoder "resnet18" \
     --p_aug=0.5 \
     --agent.use_DiT \
+    --log_interval 10 
     # --agent.weight_decay 0.1
 
 # #-task$2-v0 \

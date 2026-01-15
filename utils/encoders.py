@@ -128,16 +128,18 @@ class RobotResNet(nn.Module):
 
         # 2. Forward Pass (Backbone)
         # Use train=False if freezing to keep Batch Norm statistics stable
-        backbone_train_mode = train and not self.freeze_backbone
+        features_dict = backbone(x, train=False)
+        features = list(features_dict.values())[-2]
+        # backbone_train_mode = train and not self.freeze_backbone
         
         # Get dictionary of feature maps
-        features_dict = backbone(x, train=backbone_train_mode)
+        # features_dict = backbone(x, train=backbone_train_mode)
         
         # Extract the last spatial feature map.
         # For ResNet18/34 in flaxmodels, the last block is usually 'block4_1'.
         # For ResNet50, it is usually 'block4_2'. 
         # To be safe, we grab the last value from the dictionary.
-        features = list(features_dict.values())[-2]
+        # features = list(features_dict.values())[-2]
         
         # [Optional] Stop Gradient to freeze weights strictly
         if self.freeze_backbone:
@@ -227,40 +229,3 @@ encoder_modules = {
     k: functools.partial(MultiViewWrapper, encoder_cls=v)
     for k, v in base_modules.items()
 }
-
-
-def main():
-    # Configuration
-    OUTPUT_DIM = 512
-    IMAGE_SIZE = 224
-    BATCH_SIZE = 2
-    
-    print(f"Creating model with Output Dim: {OUTPUT_DIM}...")
-
-    # Initialize Model
-    model = RobotResNet(
-        output_dim=OUTPUT_DIM, 
-        backbone_name='resnet18', 
-        freeze_backbone=True
-    )
-
-    # Create dummy input
-    key = jax.random.PRNGKey(0)
-    dummy_input = jnp.ones((BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, 3))
-
-    # Initialize Variables (This will download ImageNet weights automatically)
-    print("Initializing variables (downloading weights if needed)...")
-    variables = model.init(key, dummy_input)
-
-    # Run Inference
-    print("Running forward pass...")
-    output = model.apply(variables, dummy_input, train=False)
-
-    # Check Dimensions
-    print("-" * 30)
-    print(f"Input Shape:  {dummy_input.shape}")
-    print(f"Output Shape: {output.shape}")
-    print("-" * 30)
-
-if __name__ == "__main__":
-    main()

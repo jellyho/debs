@@ -255,9 +255,9 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
 
         if config['use_DiT']:
             actor_bc_flow_def = MFDiT_REAL(
-                hidden_dim=256,
-                depth=3,
-                num_heads=2,
+                hidden_dim=512,
+                depth=10,
+                num_heads=8,
                 output_dim=action_dim,  
                 output_len=action_len,
                 use_r=True,
@@ -295,10 +295,19 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             network_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
         else:
             if config['use_DiT']:
+                warmup_steps = int(config['training_steps'] * 0.01)
+                decay_steps = config['training_steps'] - warmup_steps
+                lr_schedule = optax.warmup_cosine_decay_schedule(
+                    init_value=0.0,             # Warmup 시작 LR (보통 0)
+                    peak_value=config['lr'],    # Warmup 끝난 후 도달할 최대 LR
+                    warmup_steps=warmup_steps,
+                    decay_steps=decay_steps, # 전체 감쇠 기간
+                    end_value=config['lr'] / 10 # 학습 끝날 때 LR (보통 peak의 1/10 ~ 0)
+                )
                 network_tx = optax.chain(
-                optax.clip_by_global_norm(1.0),
-                optax.adam(learning_rate=config['lr'])
-            )
+                    optax.clip_by_global_norm(1.0),
+                    optax.adam(learning_rate=lr_schedule),
+                )
             else:
                 network_tx = optax.adam(learning_rate=config['lr'])
 
@@ -344,6 +353,7 @@ def get_config():
             latent_dist='normal',
             use_DiT=False,
             mf_method='jit_mf',
+            trainig_steps=1000000,
 
             ######### unused
             alpha=1.0,

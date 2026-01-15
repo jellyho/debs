@@ -133,6 +133,7 @@ def main(_):
         json.dump(flag_dict, f)
 
     config = FLAGS.agent
+    config.training_steps=FLAGS.offline_steps
     
     # data loading
     if FLAGS.ogbench_dataset_dir is not None:
