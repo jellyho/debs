@@ -50,6 +50,9 @@ flags.DEFINE_float('dataset_proportion', 1.0, "Proportion of the dataset to use"
 flags.DEFINE_integer('dataset_replace_interval', 1000, 'Dataset replace interval, used for large datasets because of memory constraints')
 flags.DEFINE_string('ogbench_dataset_dir', None, 'OGBench dataset directory')
 
+flags.DEFINE_string('droid_dataset_dir', None, 'DROID dataset directory')
+flags.DEFINE_bool('droid_use_failure', False, 'Use failure DROID dataset or not')
+
 flags.DEFINE_integer('horizon_length', 5, 'action chunking length.')
 flags.DEFINE_bool('sparse', False, "make the task sparse reward")
 flags.DEFINE_bool('save_all_online_states', False, "save all trajectories to npy")
@@ -72,6 +75,42 @@ class LoggingHelper:
             self.wandb_logger.log({f'{k}': self.iterate(k, v) for k, v in data.items()}, step=step)
         else:
             self.wandb_logger.log({f'{prefix}/{k}': self.iterate(k, v) for k, v in data.items()}, step=step)
+
+def get_param_count(agent):
+        """Calculate and return the number of parameters in the network."""
+        params = agent.network.params
+        if hasattr(params, 'unfreeze'):
+            params = params.unfreeze()
+        
+        param_counts = {}
+        
+        # Calculate module-wise parameter counts
+        for module_name, module_params in params.items():
+            module_leaves = jax.tree_util.tree_leaves(module_params)
+            param_counts[module_name] = sum(param.size for param in module_leaves)
+        
+        # Calculate total parameters
+        all_leaves = jax.tree_util.tree_leaves(params)
+        param_counts['total'] = sum(param.size for param in all_leaves)
+        
+        return param_counts
+
+def print_param_stats(agent):
+    """Print network parameter statistics."""
+    param_counts = get_param_count(agent)
+    
+    print("Network Parameter Statistics:")
+    print("-" * 50)
+    
+    # Print module-wise parameter counts
+    for module_name, count in param_counts.items():
+        if module_name != 'total':
+            print(f"{module_name}: {count:,} parameters ({count * 4 / (1024**2):.2f} MB)")
+    
+    # Print total parameter count
+    total = param_counts['total']
+    print("-" * 50)
+    print(f"Total parameters: {total:,} ({total * 4 / (1024**2):.2f} MB)")
 
 def main(_):
     if FLAGS.task_config != 'NO':
@@ -110,7 +149,11 @@ def main(_):
             compact_dataset=False,
         )
     else:
-        env, eval_env, train_dataset, val_dataset = make_env_and_datasets(FLAGS.env_name)
+        env, eval_env, train_dataset, val_dataset = make_env_and_datasets(
+            FLAGS.env_name, 
+            droid_dir=FLAGS.droid_dataset_dir,
+            droid_use_failure=FLAGS.droid_use_failure
+        )
 
     # house keeping
     random.seed(FLAGS.seed)
@@ -161,33 +204,31 @@ def main(_):
     
     train_dataset = process_train_dataset(train_dataset)
     example_batch = train_dataset.sample(config['batch_size'])
-    print(example_batch['rewards'].mean(), example_batch['rewards'].min(), example_batch['rewards'].max())
 
-    for k, v in example_batch.items():
-        try:
-            print(f"{k}: {v.shape}")
-        except:
-            pass
+    def print_batch_shapes(batch, prefix=""):
+        for k, v in batch.items():
+            try:
+                print(f"{prefix}{k}: {v.shape}")
+            except (AttributeError, TypeError):
+                if isinstance(v, dict):
+                    print_batch_shapes(v, prefix=f"{prefix}{k}.")
+                else:
+                    pass
+
+    print_batch_shapes(example_batch)
+
+    is_droid = True if FLAGS.droid_dataset_dir is not None else False
 
     agent_class = agents[config['agent_name']]
-    if config['agent_name'] == 'meanflow_robot':
-        agent = agent_class.create(
-            seed=FLAGS.seed,
-            ex_observations=example_batch['observations'],
-            ex_actions=example_batch['actions'],
-            ex_images=None,
-            config=config,
-        )
-    else:
-        agent = agent_class.create(
-            FLAGS.seed,
-            example_batch['observations'],
-            example_batch['actions'],
-            config,
-        )
 
-    if config['agent_name'] == 'meanflow':
-        agent.print_param_stats()
+    agent = agent_class.create(
+        FLAGS.seed,
+        example_batch['observations'],
+        example_batch['actions'],
+        config,
+    )
+
+    print_param_stats(agent)
 
     # Setup logging.
     prefixes = ["eval", "env"]
@@ -197,6 +238,8 @@ def main(_):
     logger = LoggingHelper(
         wandb_logger=wandb,
     )
+
+  
 
     # Offline RL
     for i in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):
@@ -208,7 +251,7 @@ def main(_):
             logger.log(info, step=log_step)
         
         # saving
-        if FLAGS.save_interval > 0 and i % FLAGS.eval_interval == 0:
+        if not is_droid and FLAGS.save_interval > 0 and i % FLAGS.eval_interval == 0:
             if (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
                 # during eval, the action chunk is executed fully
                 if "bandit" in FLAGS.env_name:

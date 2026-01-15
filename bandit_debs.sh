@@ -14,7 +14,7 @@ python main.py \
     --save_dir "exp/" \
     --agent.latent_dist $3 \
     --agent.alpha $4 \
-    --agent.mf_method 'mf' \
+    --agent.mf_method 'jit_mf' \
     # --seed $5 \
     # --agent.use_DiT
     # --agent.mf_method='jit_mf' \

@@ -11,6 +11,7 @@ from functools import partial
 
 from jax.nn.initializers import zeros, constant
 
+
 def default_init(scale: Optional[float] = 1.0, *args, **kwargs):
     return nn.initializers.variance_scaling(scale, "fan_avg", "uniform")
 

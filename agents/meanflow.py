@@ -9,7 +9,7 @@ import optax
 
 from agents.meanflow_utils import adaptive_l2_loss, sample_t_r, sample_latent_dist
 from utils.encoders import encoder_modules
-from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
+from utils.flax_utils import ModuleDict, TrainState, nonpytree_field, get_batch_shape
 from utils.networks import ActorMeanFlowField
 from utils.dit import MFDiT_REAL
 
@@ -20,6 +20,7 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
     network: Any
     config: Any = nonpytree_field()
         
+    @jax.jit
     def actor_loss(self, batch, grad_params, rng):
         """Compute the FQL actor loss."""
         batch_actions = jnp.reshape(batch["actions"], (batch["actions"].shape[0], -1))  # fold in horizon_length together with action_dim
@@ -158,14 +159,18 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         """
         rng, x_rng = jax.random.split(rng, 2)
         latent_dim = self.config["horizon_length"] * self.config["action_dim"]
-        e = sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim), self.config['latent_dist'])
+        batch_shape = get_batch_shape(observations, self.config['leaf_ndims'])
+
+        e = sample_latent_dist(
+            x_rng, 
+            (*batch_shape, latent_dim), 
+            self.config['latent_dist']
+        )
         actions = self.compute_flow_actions(observations, e)
         actions = jnp.reshape(
             actions, 
-            (*observations.shape[: -len(self.config['ob_dims'])],  # batch_size
-            self.config["horizon_length"], self.config["action_dim"])
+            (*batch_shape, self.config["horizon_length"], self.config["action_dim"])
         )
-        # return e
         return actions
     
     def target_update(self, network, module_name):
@@ -184,8 +189,8 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         noise,
     ):
         """Compute actions from the BC flow model using the Euler method."""
-        t = jnp.ones((*observation.shape[: -len(self.config['ob_dims'])], 1))
-        r = jnp.zeros((*observation.shape[: -len(self.config['ob_dims'])], 1))
+        t = jnp.ones_like((noise[..., :1]))
+        r = jnp.zeros_like((noise[..., :1]))
 
         if self.config['mf_method'] == 'jit':
             output = self.network.select('actor_bc_flow')(
@@ -224,10 +229,15 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ob_dims = ex_observations.shape[-1:]
+        leaf_ndims = jax.tree_util.tree_map(
+            lambda x: x.ndim - 1,
+            ex_observations
+        )
+        config['leaf_ndims'] = leaf_ndims
+
         action_dim = ex_actions.shape[-1]
         action_len = ex_actions.shape[1]
-        
+
         full_actions = jnp.reshape(
             ex_actions,
             (ex_actions.shape[0], -1)
@@ -249,7 +259,7 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
                 output_dim=action_dim,  
                 output_len=action_len,
                 use_r=True,
-                encoders=None,
+                encoder=encoders['actor_bc_flow']
             )
         else:
             actor_bc_flow_def = ActorMeanFlowField(
@@ -279,57 +289,23 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
         if config["weight_decay"] > 0.:
             network_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
         else:
-            network_tx = optax.chain(
+            if config['use_DiT']:
+                network_tx = optax.chain(
                 optax.clip_by_global_norm(1.0),
                 optax.adam(learning_rate=config['lr'])
             )
+            else:
+                network_tx = optax.adam(learning_rate=config['lr'])
 
         network_params = network_def.init(init_rng, **network_args)['params']
         network = TrainState.create(network_def, network_params, tx=network_tx)
 
         params = network.params
 
-        config['ob_dims'] = ob_dims
+        # config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim
 
         return cls(rng, network=network, config=flax.core.FrozenDict(**config))
-    
-
-    def get_param_count(self):
-            """Calculate and return the number of parameters in the network."""
-            params = self.network.params
-            if hasattr(params, 'unfreeze'):
-                params = params.unfreeze()
-            
-            param_counts = {}
-            
-            # Calculate module-wise parameter counts
-            for module_name, module_params in params.items():
-                module_leaves = jax.tree_util.tree_leaves(module_params)
-                param_counts[module_name] = sum(param.size for param in module_leaves)
-            
-            # Calculate total parameters
-            all_leaves = jax.tree_util.tree_leaves(params)
-            param_counts['total'] = sum(param.size for param in all_leaves)
-            
-            return param_counts
-
-    def print_param_stats(self):
-        """Print network parameter statistics."""
-        param_counts = self.get_param_count()
-        
-        print("Network Parameter Statistics:")
-        print("-" * 50)
-        
-        # Print module-wise parameter counts
-        for module_name, count in param_counts.items():
-            if module_name != 'total':
-                print(f"{module_name}: {count:,} parameters ({count * 4 / (1024**2):.2f} MB)")
-        
-        # Print total parameter count
-        total = param_counts['total']
-        print("-" * 50)
-        print(f"Total parameters: {total:,} ({total * 4 / (1024**2):.2f} MB)")
 
 
 def get_config():

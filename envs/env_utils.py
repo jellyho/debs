@@ -87,7 +87,7 @@ class FrameStackWrapper(gymnasium.Wrapper):
         self.frames.append(ob)
         return self.get_observation(), reward, terminated, truncated, info
 
-def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
+def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5, droid_dir=None, droid_use_failure=False):
     """Make offline RL environment and datasets.
 
     Args:
@@ -99,7 +99,14 @@ def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
         A tuple of the environment, evaluation environment, training dataset, and validation dataset.
     """
 
-    if 'singletask' in env_name:
+    if droid_dir is not None:
+        from envs import droid_utils
+        import os
+        droid_path = os.path.join(droid_dir, env_name)
+        dataset = droid_utils.load_droid_dataset(droid_path, include_failure=droid_use_failure)
+        train_dataset = Dataset.create(**dataset)
+        env, eval_env, val_dataset = None, None, None
+    elif 'singletask' in env_name:
         # OGBench.
         env, train_dataset, val_dataset = ogbench.make_env_and_datasets(env_name)
         eval_env = ogbench.make_env_and_datasets(env_name, env_only=True)
@@ -148,8 +155,10 @@ def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
         env = FrameStackWrapper(env, frame_stack)
         eval_env = FrameStackWrapper(eval_env, frame_stack)
 
-    env.reset()
-    eval_env.reset()
+    if env is not None:
+        env.reset()
+    if eval_env is not None:
+        eval_env.reset()
 
     # Clip dataset actions.
     if action_clip_eps is not None:

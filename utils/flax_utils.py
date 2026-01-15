@@ -12,6 +12,23 @@ import optax
 
 nonpytree_field = functools.partial(flax.struct.field, pytree_node=False)
 
+def get_batch_shape(observations, leaf_ndims):
+    flat_obs, _ = jax.tree_util.tree_flatten(observations)
+    flat_ref_ndims, _ = jax.tree_util.tree_flatten(leaf_ndims)
+    
+    if not flat_obs:
+        return ()
+
+    obs_leaf = flat_obs[0]    
+    ref_ndim = flat_ref_ndims[0]
+
+    # 차원 비교
+    if obs_leaf.ndim == ref_ndim:
+        return ()
+    elif obs_leaf.ndim == ref_ndim + 1:
+        return (obs_leaf.shape[0],)
+    else:
+        raise ValueError(f"Input dimension mismatch! Expected {ref_ndim} or {ref_ndim+1}, got {obs_leaf.ndim}")
 
 class ModuleDict(nn.Module):
     """A dictionary of modules.

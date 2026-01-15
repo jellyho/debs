@@ -6,6 +6,7 @@ import numpy as np
 import math
 from typing import Any, Callable, Optional, Tuple, Sequence
 from functools import partial
+import flax
 
 
 def kaiming_normal(scale=2.0):
@@ -494,43 +495,30 @@ class MFDiT(nn.Module):
     
 class MFDiT_REAL(nn.Module):
     """
-    Diffusion Transformer (DiT) model for 1D vector data.
+    Diffusion Transformer (DiT) model with Dynamic Positional Embedding.
+    Supports Multi-View input via a single unified encoder.
+    Handles both Batched and Unbatched inputs transparently.
     """
-    input_dim: int = 0  # Set to 0 to infer from input
+    input_dim: int = 0 
     hidden_dim: int = 1152
     depth: int = 28
     num_heads: int = 16
     mlp_ratio: float = 4.0
     output_dim: int = 0  
     output_len: int = 5
-    encoders: Optional[Sequence[nn.Module]] = None
-    tanh_squash: bool = False  # Changed from True to False
-    final_fc_init_scale: float = 0.0  # Changed from 1e-4 to 0.0
-    use_output_layernorm: bool = False  # Changed from True to False
+    encoder: nn.Module = None 
+    tanh_squash: bool = False  
+    final_fc_init_scale: float = 0.0  
+    use_output_layernorm: bool = False  
     gradient_clip_norm: float = 1.0
     residual_scale: float = 0.1
     use_r: bool = True
     
     def setup(self):
-        # Dual timestep embedders (keeping this unique feature)
+        # Time embedders
         self.t_embedder = TimestepEmbedder(dim=self.hidden_dim)
         if self.use_r:
             self.r_embedder = TimestepEmbedder(dim=self.hidden_dim)
-        
-        if self.encoders is None:
-            obs_len = 1
-        else:
-            obs_len = len(self.encoders) + 1 # image + state
-            print(f"[IMAGE INPUT] : {len(self.encoders)} image input detected")
-
-        # Positional embedding
-        self.pos_embed = self.param(
-            'pos_embed',
-            nn.initializers.normal(stddev=0.005), 
-            (1, obs_len + self.output_len, self.hidden_dim)
-        )
-
-        print(f"Total input sequence to DiT : {obs_len} + {self.output_len} = {obs_len + self.output_len}")
         
         # Transformer blocks
         self.blocks = [
@@ -541,80 +529,114 @@ class MFDiT_REAL(nn.Module):
             )
             for _ in range(self.depth)
         ]
-    
+
     @nn.compact
-    def __call__(self, observations, actions=None, t=None, r=None,images=None, is_encoded=False, train=True):
+    def __call__(self, observations, actions, t, r=None, train=True):
         """
-        Forward pass of DiT.
-        observations: [..., obs_dim],
-        images: (somthing)
-        actions: [..., act_dim]
-        r: Additional timestep (optional)
-        t: Diffusion timestep (optional)
-        is_encoded: Whether observations are already encoded
-        train: Whether in training mode
+        Forward pass.
+        observations: Dict or Array
+        actions: (B, N_act * A) or (N_act * A,)
         """
         
-        if images is not None and self.encoders is not None:
-            imgs_encoded = []
-            for i, imgs in enumerate(images):
-                imgs_encoded.append(self.encoders[i](imgs)) # B, ?
-            imgs_inputs = jnp.stack(imgs_encoded, axis=1) # B, N_obs, ?
-            imgs_embedder = FeatureEmbed(input_dim=imgs_inputs.shape[-1], embed_dim=self.hidden_dim)    
-            imgs_embed = imgs_embedder(imgs_inputs) # B, N_obs, ? -> B, N_obs, H
-        else:
-            imgs_embedder = None
-            imgs_embed = None
-                    
-        # Combine obs and action
-        obs_embedder = FeatureEmbed(input_dim=observations.shape[-1], embed_dim=self.hidden_dim)
-        obs_embed = obs_embedder(observations) # B, ? -> B, 1, H
-
-        print('obs', obs_embed.shape)
-
-        noise_embedder = FeatureEmbed(input_dim=self.output_dim, embed_dim=self.hidden_dim)
-        noise = actions.reshape(-1, self.output_len, self.output_dim) # B, N_act, A
-        noise_embed = noise_embedder(noise) # B, N_act, A -> B, N_act, H
-
-        print('noise', noise_embed.shape)
-
-        if imgs_embed is not None:
-            x = jnp.concatenate([imgs_embed, obs_embed, noise_embed], axis=1) # B, L, H
-        else:
-            x = jnp.concatenate([obs_embed, noise_embed], axis=1) # B, L, H
-
-        print('total', x.shape)
+        # ==================================================================
+        # 1. [Batch Promotion] 입력 차원 승격
+        # ==================================================================
+        # actions가 1차원(Dim,)이면 배치가 없는 것으로 간주합니다.
+        is_unbatched = (actions.ndim == 1)
         
-        final_layer = FinalLayer(
-            dim=self.hidden_dim,
-            out_dim=self.output_dim,
-            init_scale=self.final_fc_init_scale
-        )
-        # Dynamically create embedder and final layer if needed
-
-        # Embed
-        x = x + self.pos_embed  # shape: [B, L, H]
+        if is_unbatched:
+            # (Dim,) -> (1, Dim)
+            actions = jnp.expand_dims(actions, axis=0)
+            
+            # t, r도 (1,) 또는 (1, 1)로 확장
+            if t is not None: t = jnp.expand_dims(t, axis=0)
+            if r is not None: r = jnp.expand_dims(r, axis=0)
+            
+            # observations (Dict or Array) 일괄 확장
+            # jax.tree_map을 쓰면 Dict 내부의 image, state까지 싹 다 (1, ...)로 만들어줍니다.
+            observations = jax.tree_util.tree_map(
+                lambda x: jnp.expand_dims(x, axis=0), 
+                observations
+            )
         
-        # Dual timestep embedding (keeping this unique feature)
+        # 이제부터 B는 무조건 존재합니다. (Unbatched인 경우 B=1)
+        B = actions.shape[0]
+
+        embeddings = []
+
+        # ==================================================================
+        # 2. Embedding Logic (기존과 동일하지만 B가 보장됨)
+        # ==================================================================
+        
+        # (A) Dictionary Input
+        if isinstance(observations, (dict, flax.core.FrozenDict)):
+            if 'image' in observations and self.encoder is not None:
+                images = observations['image'] # (B, H, W, C)
+                
+                # Encoder (MultiViewWrapper도 B=1 입력을 잘 처리함)
+                img_embed = self.encoder(images, train=train) 
+                img_embed = FeatureEmbed(input_dim=img_embed.shape[-1], embed_dim=self.hidden_dim)(img_embed)
+                
+                # (B, H) -> (B, 1, H)
+                if img_embed.ndim == 2: img_embed = img_embed[:, None, :]
+                embeddings.append(img_embed)
+
+            if 'state' in observations:
+                state = observations['state'] # (B, D_s)
+                state_embed = FeatureEmbed(input_dim=state.shape[-1], embed_dim=self.hidden_dim)(state)
+                if state_embed.ndim == 2: state_embed = state_embed[:, None, :]
+                embeddings.append(state_embed)
+
+        # (B) Array Input
+        else:
+            if self.encoder is not None and observations.ndim >= 3:
+                img_embed = self.encoder(observations, train=train)
+                img_embed = FeatureEmbed(input_dim=img_embed.shape[-1], embed_dim=self.hidden_dim)(img_embed)
+                if img_embed.ndim == 2: img_embed = img_embed[:, None, :]
+                embeddings.append(img_embed)
+            else:
+                obs_embed = FeatureEmbed(input_dim=observations.shape[-1], embed_dim=self.hidden_dim)(observations)
+                if obs_embed.ndim == 2: obs_embed = obs_embed[:, None, :]
+                embeddings.append(obs_embed)
+
+        # (C) Action Embedding
+        # B가 1이든 N이든 안전하게 Reshape 가능
+        noise_input = actions.reshape(B, self.output_len, self.output_dim)
+        noise_embed = FeatureEmbed(input_dim=self.output_dim, embed_dim=self.hidden_dim)(noise_input)
+        embeddings.append(noise_embed)
+
+        # ==================================================================
+        # 3. Transformer Processing
+        # ==================================================================
+        x = jnp.concatenate(embeddings, axis=1) # (B, L, H)
+        
+        # Dynamic Positional Embedding
+        seq_len = x.shape[1]
+        pos_embed = self.param('pos_embed', nn.initializers.normal(stddev=0.005), (1, seq_len, self.hidden_dim))
+        x = x + pos_embed
+
+        # Timestep
         if self.use_r:
-            t_emb = self.t_embedder(t)
-            r_emb = self.r_embedder(r)
-            c = t_emb + r_emb
+            c = self.t_embedder(t) + self.r_embedder(r)
         else:
-            # Fallback to single timestep if only t is provided
-            t_emb = self.t_embedder(t)
-            c = t_emb        
-        # Transformer blocks with unified residual mix (like MFDiT_SIM)
+            c = self.t_embedder(t)
+
         for block in self.blocks:
             x_res = x
             x = block(x, c=c, deterministic=not train)
             x = x_res + self.residual_scale * (x - x_res)
 
-        # Final projection
-        x = final_layer(x, c=c) # B, L, A
+        final_layer = FinalLayer(dim=self.hidden_dim, out_dim=self.output_dim, init_scale=self.final_fc_init_scale)
+        x = final_layer(x, c=c) 
         
-        # Collapse sequence dimension
-        x = x[:, -self.output_len:, :] #B, N_Act, A
-        x = x.reshape(-1, self.output_len * self.output_dim)
+        x = x[:, -self.output_len:, :] 
+        x = x.reshape(B, -1) # Flatten -> (B, N_act * A)
         
+        # ==================================================================
+        # 4. [Batch Demotion] 차원 복원
+        # ==================================================================
+        if is_unbatched:
+            # (1, Output_Dim) -> (Output_Dim,)
+            x = jnp.squeeze(x, axis=0)
+            
         return x
