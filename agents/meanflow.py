@@ -95,6 +95,8 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             u_tgt = jax.lax.stop_gradient(u_tgt)
             err = u_pred - u_tgt
             loss = adaptive_l2_loss(err)
+        else:
+            raise NotImplementedError
         #########################################
 
         return loss, {
@@ -279,7 +281,10 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
 
         if encoders.get('actor_bc_flow') is not None:
             # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
-            network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
+            if isinstance(ex_observations, (dict, flax.core.FrozenDict)):
+                network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations['image'],))
+            else:
+                network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
 
         networks = {k: v[0] for k, v in network_info.items()}
         network_args = {k: v[1] for k, v in network_info.items()}
@@ -297,8 +302,15 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             else:
                 network_tx = optax.adam(learning_rate=config['lr'])
 
-        network_params = network_def.init(init_rng, **network_args)['params']
-        network = TrainState.create(network_def, network_params, tx=network_tx)
+        variables = network_def.init(init_rng, **network_args)
+        network_params = variables['params']
+        batch_stats = variables.get('batch_stats', flax.core.FrozenDict({}))
+        network = TrainState.create(
+            network_def, 
+            network_params, 
+            tx=network_tx,
+            batch_stats=batch_stats
+        )
 
         params = network.params
 
@@ -331,7 +343,7 @@ def get_config():
             flow_ratio=0.1,
             latent_dist='normal',
             use_DiT=False,
-            mf_method='mf',
+            mf_method='jit_mf',
 
             ######### unused
             alpha=1.0,

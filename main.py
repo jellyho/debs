@@ -251,8 +251,8 @@ def main(_):
             logger.log(info, step=log_step)
         
         # saving
-        if not is_droid and FLAGS.save_interval > 0 and i % FLAGS.eval_interval == 0:
-            if (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
+        if FLAGS.save_interval > 0 and i % FLAGS.eval_interval == 0:
+            if not is_droid and (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
                 # during eval, the action chunk is executed fully
                 if "bandit" in FLAGS.env_name:
                     from envs.bandit_utils import evaluate
@@ -280,7 +280,7 @@ def main(_):
                         wandb.log({
                             f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
                         }, step=log_step)
-    save_agent(agent, FLAGS.save_dir, log_step)
+            save_agent(agent, FLAGS.save_dir, log_step)
 
 if __name__ == '__main__':
     app.run(main)

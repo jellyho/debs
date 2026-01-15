@@ -21,6 +21,7 @@ python main.py \
     --agent.latent_dist "$3" \
     --agent.alpha $4 \
     --agent.extract_method "ddpg" \
+    --agent.mf_method "jit_mf" \
     --seed $6 \
     --agent.encoder "resnet18" \
     --p_aug=0.5 \
