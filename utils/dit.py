@@ -531,7 +531,7 @@ class MFDiT_REAL(nn.Module):
         ]
 
     @nn.compact
-    def __call__(self, observations, actions, t, r=None, train=True):
+    def __call__(self, observations, actions, t, r=None, train=True, is_encoded=False):
         """
         Forward pass.
         observations: Dict or Array
@@ -571,10 +571,13 @@ class MFDiT_REAL(nn.Module):
             if 'image' in observations and self.encoder is not None:
                 images = observations['image'] # (B, H, W, C)
                 
-                # Encoder (MultiViewWrapper도 B=1 입력을 잘 처리함)
-                img_embed = self.encoder(images, train=train) 
+                if not is_encoded:
+                    # Encoder (MultiViewWrapper도 B=1 입력을 잘 처리함)
+                    img_embed = self.encoder(images, train=train) 
+                else:
+                    img_embed = images
+
                 img_embed = FeatureEmbed(input_dim=img_embed.shape[-1], embed_dim=self.hidden_dim)(img_embed)
-                
                 # (B, H) -> (B, 1, H)
                 if img_embed.ndim == 2: img_embed = img_embed[:, None, :]
                 embeddings.append(img_embed)
@@ -646,7 +649,6 @@ COMMON_CONFIG = {
     'mlp_ratio': 4.0,
     'tanh_squash': False,
     'use_output_layernorm': False,
-    'use_r': True,
 }
 
 # -----------------------------------------------------------------------------

@@ -258,7 +258,8 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             actor_bc_flow_def = model_cls(
                 output_dim=action_dim,  
                 output_len=action_len,
-                encoder=encoders['actor_bc_flow']
+                encoder=encoders['actor_bc_flow'],
+                use_r=True
             )
         else:
             actor_bc_flow_def = ActorMeanFlowField(
@@ -346,7 +347,7 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
-            flow_ratio=0.1,
+            flow_ratio=0.25,
             latent_dist='normal',
             use_DiT=False,
             size_DiT='base',

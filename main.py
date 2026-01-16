@@ -1,4 +1,7 @@
-import glob, tqdm, wandb, os, json, random, time, jax
+import glob, tqdm, wandb, os, json, random, time
+# JAX import 전에 반드시 선언해야 합니다!
+os.environ['XLA_FLAGS'] = '--xla_gpu_strict_conv_algorithm_picker=false'
+import jax
 from absl import app, flags
 from ml_collections import config_flags
 from log_utils import setup_wandb, get_exp_name, get_flag_dict, CsvLogger

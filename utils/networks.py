@@ -3,7 +3,7 @@ from typing import Any, Optional, Sequence, Callable
 import distrax
 import flax.linen as nn
 import jax.numpy as jnp
-
+import flax
 
 def default_init(scale=1.0):
     """Default kernel initializer."""
@@ -203,7 +203,12 @@ class Value(nn.Module):
             actions: Actions (optional).
         """
         if self.encoder is not None:
-            inputs = [self.encoder(observations)]
+            if isinstance(observations, (dict, flax.core.FrozenDict)):
+                img_embed = self.encoder(observations['image'])
+                state = observations['state']
+                inputs = [img_embed, state]
+            else:
+                inputs = [self.encoder(observations)]
         else:
             inputs = [observations]
         if actions is not None:
@@ -313,6 +318,19 @@ class ActorVectorField(nn.Module):
             observations = self.encoder(observations)
         inputs.append(observations)
 
+        if self.encoder is not None:
+            if isinstance(observations, (dict, flax.core.FrozenDict)):
+                if not is_encoded:
+                    img_embed = self.encoder(observations['image'])
+                else:
+                    img_embed = observations['image']
+                state = observations['state']
+                inputs = [img_embed, state]
+            else:
+                inputs = [self.encoder(observations)]
+        else:
+            inputs = [observations]
+
         if actions is not None:
             inputs.append(actions)
 
@@ -346,106 +364,7 @@ class ActorVectorField(nn.Module):
         elif self.latent_dist == 'beta':
             return 2 * nn.tanh(v)
         return v
-
-class AdvantageConditionedActorVectorField(nn.Module):
-    """
-    Actor vector field network that conditions on an 'advantage' scalar.
     
-    This network uses Fourier Features to embed the advantage value.
-    Since deep networks tend to be biased towards low-frequency functions (Spectral Bias),
-    directly concatenating a scalar advantage value often leads to poor conditioning.
-    Projecting the bounded advantage value into a higher-dimensional Fourier space
-    helps the network capture high-frequency dependencies on the advantage.
-
-    Attributes:
-        hidden_dims: Hidden layer dimensions.
-        action_dim: Action dimension.
-        layer_norm: Whether to apply layer normalization.
-        encoder: Optional encoder module to encode the inputs.
-        use_fourier_features: Whether to use Fourier features for timesteps.
-        fourier_feature_dim: Dimension for timestep Fourier features.
-        advantage_fourier_dim: Dimension for advantage Fourier features.
-    """
-
-    hidden_dims: Sequence[int]
-    action_dim: int
-    layer_norm: bool = False
-    encoder: nn.Module = None
-    use_fourier_features: bool = False
-    fourier_feature_dim: int = 64
-    
-    # New attribute for advantage embedding dimension
-    advantage_fourier_feature_dim: int = 64
-    use_cfg: bool = False
-
-    def setup(self) -> None:
-        # Standard MLP for the vector field
-        self.mlp = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
-
-        # Fourier Features for Timestep (t)
-        if self.use_fourier_features:
-            self.ff = FourierFeatures(self.fourier_feature_dim)
-        
-        # Fourier Features for Advantage (adv)
-        # We use fixed frequencies (learnable=False) which is generally more stable 
-        # for bounded inputs like advantage estimates (normalized to [0, 1] or [-1, 1]).
-        self.adv_ff = FourierFeatures(self.advantage_fourier_feature_dim)
-
-        if self.use_cfg:
-            self.null_embedding = self.param(
-                'null_embedding',
-                nn.initializers.normal(stddev=0.02),
-                (self.advantage_fourier_feature_dim, )
-            )
-
-    @nn.compact
-    def __call__(self, observations, actions, advantage, times, mask, is_encoded=False):
-        """
-        Return the vectors at the given states, actions, advantage, and times.
-
-        Args:
-            observations: Observations (Batch, Obs_Dim).
-            actions: Actions (Batch, Act_Dim).
-            advantage: Advantage scalars (Batch,) or (Batch, 1).
-                       Expected to be bounded (e.g., [-1, 1] or [0, 1]).
-            times: Times (optional).
-            mask: Bool (True for masking (concond), False for conditioning)
-            is_encoded: Whether the observations are already encoded.
-        """
-        # 1. Encode observations if necessary
-        if not is_encoded and self.encoder is not None:
-            observations = self.encoder(observations)
-
-        null_embedding = jnp.broadcast_to(
-            self.null_embedding,
-            (*observations.shape[:-1], self.advantage_fourier_feature_dim)
-        )
-
-        adv_embedding = self.adv_ff(advantage)
-
-        g_embedding = jnp.where(
-            mask.astype(jnp.bool), 
-            null_embedding,
-            adv_embedding
-        )
-            
-        # 3. Construct Input List
-        inputs_list = [observations, actions, g_embedding]
-
-        # 4. Process Time (if provided)
-        if times is not None:
-            if self.use_fourier_features:
-                times = self.ff(times)
-            inputs_list.append(times)
-
-        # 5. Concatenate all inputs along the last dimension
-        inputs = jnp.concatenate(inputs_list, axis=-1)
-
-        # 6. Pass through the MLP
-        v = self.mlp(inputs)
-
-        return v
-
 class ActorMeanFlowField(nn.Module):
     """
     Actor vector field network that conditions on an 'advantage' scalar.
