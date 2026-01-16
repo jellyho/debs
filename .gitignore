@@ -10,3 +10,4 @@ dist/
 exp/
 plots/
 wandb/ 
+eval_logs/

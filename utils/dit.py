@@ -537,13 +537,11 @@ class MFDiT_REAL(nn.Module):
         observations: Dict or Array
         actions: (B, N_act * A) or (N_act * A,)
         """
-        
         # ==================================================================
         # 1. [Batch Promotion] 입력 차원 승격
         # ==================================================================
         # actions가 1차원(Dim,)이면 배치가 없는 것으로 간주합니다.
         is_unbatched = (actions.ndim == 1)
-        
         if is_unbatched:
             # (Dim,) -> (1, Dim)
             actions = jnp.expand_dims(actions, axis=0)

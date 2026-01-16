@@ -9,20 +9,51 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import optax
+import ml_collections
 
 nonpytree_field = functools.partial(flax.struct.field, pytree_node=False)
 
 def get_batch_shape(observations, leaf_ndims):
+    """
+    Get the batch shape from observations.
+    Robustly handles Dictionary inputs even if keys don't perfectly match (subset).
+    """
+    # 1. Handle Dictionary types (Dict, FrozenDict, ConfigDict)
+    if isinstance(observations, (dict, flax.core.FrozenDict, ml_collections.ConfigDict)):
+        # Iterate through keys in observations to find the first match in leaf_ndims.
+        for key, value in observations.items():
+            # Check if leaf_ndims is also a dict and has the same key
+            if isinstance(leaf_ndims, (dict, flax.core.FrozenDict, ml_collections.ConfigDict)) and key in leaf_ndims:
+                ref_ndim = leaf_ndims[key]
+                
+                # If value is a nested dictionary, recurse.
+                if isinstance(value, (dict, flax.core.FrozenDict, ml_collections.ConfigDict)):
+                    return get_batch_shape(value, ref_ndim)
+                
+                # Compare dimensions (Return immediately if a match is found)
+                if value.ndim == ref_ndim:
+                    return () # Unbatched
+                elif value.ndim == ref_ndim + 1:
+                    return (value.shape[0],) # Batched (B,)
+                else:
+                    raise ValueError(f"Dim mismatch at key '{key}': got {value.ndim}, expected {ref_ndim} or {ref_ndim+1}")
+
+    # 2. Fallback to standard Tree Flatten logic (for Arrays or perfectly matching Lists/Tuples)
     flat_obs, _ = jax.tree_util.tree_flatten(observations)
     flat_ref_ndims, _ = jax.tree_util.tree_flatten(leaf_ndims)
     
     if not flat_obs:
         return ()
 
-    obs_leaf = flat_obs[0]    
-    ref_ndim = flat_ref_ndims[0]
+    obs_leaf = flat_obs[0]
+    
+    # If leaf_ndims structure doesn't match or is empty, try to infer safely
+    if flat_ref_ndims:
+        ref_ndim = flat_ref_ndims[0]
+    else:
+        # If no reference info is available, assume the 0-th dimension is the batch dimension.
+        return (obs_leaf.shape[0],)
 
-    # 차원 비교
     if obs_leaf.ndim == ref_ndim:
         return ()
     elif obs_leaf.ndim == ref_ndim + 1:

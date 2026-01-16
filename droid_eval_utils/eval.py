@@ -58,8 +58,6 @@ try:
         # use_gpu = variant.get("use_gpu", False)
         # torch.device("cuda:0" if use_gpu else "cpu")
 
-        ckpt_path = variant["ckpt_path"]
-
         # device = TorchUtils.get_torch_device(try_to_use_cuda=True)
         # ckpt_dict = FileUtils.maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
         # config = json.loads(ckpt_dict["config"])
