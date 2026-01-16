@@ -7,7 +7,7 @@ from envs.env_utils import make_env_and_datasets
 from envs.ogbench_utils import make_ogbench_env_and_datasets
 from envs.robomimic_utils import is_robomimic_env
 
-from utils.flax_utils import save_agent
+from utils.flax_utils import save_agent, save_example_batch
 from utils.datasets import Dataset, ReplayBuffer
 
 from agents import agents
@@ -30,7 +30,7 @@ flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
 
 flags.DEFINE_integer('offline_steps', 1000000, 'Number of online steps.')
 flags.DEFINE_integer('buffer_size', 2000000, 'Replay buffer size.')
-flags.DEFINE_integer('log_interval', 5000, 'Logging interval.')
+flags.DEFINE_integer('log_interval', 10, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 100000, 'Evaluation interval.')
 flags.DEFINE_integer('save_interval', 100000, 'Save interval.')
 flags.DEFINE_integer('start_training', 5000, 'when does training start')
@@ -183,7 +183,6 @@ def main(_):
         
         if is_robomimic_env(FLAGS.env_name):
             penalty_rewards = dataset["rewards"] - 1.0
-            
             ds_dict = {k: v for k, v in dataset.items()}
             ds_dict["rewards"] = penalty_rewards
             dataset = Dataset.create(**ds_dict)
@@ -205,6 +204,8 @@ def main(_):
     
     train_dataset = process_train_dataset(train_dataset)
     example_batch = train_dataset.sample(config['batch_size'])
+
+    save_example_batch(example_batch, FLAGS.save_dir)
 
     def print_batch_shapes(batch, prefix=""):
         for k, v in batch.items():
@@ -239,8 +240,6 @@ def main(_):
     logger = LoggingHelper(
         wandb_logger=wandb,
     )
-
-  
 
     # Offline RL
     for i in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):

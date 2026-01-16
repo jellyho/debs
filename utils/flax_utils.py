@@ -29,6 +29,36 @@ def get_batch_shape(observations, leaf_ndims):
         return (obs_leaf.shape[0],)
     else:
         raise ValueError(f"Input dimension mismatch! Expected {ref_ndim} or {ref_ndim+1}, got {obs_leaf.ndim}")
+    
+def save_example_batch(batch, save_dir, filename="example_batch.pkl"):
+    """
+    JAX Array를 CPU Numpy로 변환하여 가볍게 저장합니다.
+    batch: 학습 데이터로더에서 뽑은 첫 번째 배치의 복사본
+    """
+    # 1. GPU/TPU에 있는 JAX Array를 CPU Numpy Array로 변환 (Portability)
+    # 딕셔너리 구조(tree)를 유지하면서 잎사귀(배열)만 변환합니다.
+    batch_np = jax.tree_util.tree_map(lambda x: jax.device_get(x), batch)
+    
+    # 2. 저장
+    os.makedirs(save_dir, exist_ok=True)
+    path = os.path.join(save_dir, filename)
+    
+    with open(path, 'wb') as f:
+        pickle.dump(batch_np, f)
+        
+    print(f"[System] Example batch saved for inference: {path}")
+
+def load_example_batch(load_dir, filename="example_batch.pkl"):
+    path = os.path.join(load_dir, filename)
+    
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Example batch not found at {path}. Cannot init model!")
+        
+    with open(path, 'rb') as f:
+        batch_np = pickle.load(f)
+        
+    print(f"[System] Example batch loaded from {path}")
+    return batch_np
 
 class ModuleDict(nn.Module):
     """A dictionary of modules.

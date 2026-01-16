@@ -11,7 +11,7 @@ from agents.meanflow_utils import adaptive_l2_loss, sample_t_r, sample_latent_di
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field, get_batch_shape
 from utils.networks import ActorMeanFlowField
-from utils.dit import MFDiT_REAL
+from utils.dit import mf_dit_models
 
 class MEANFLOWAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
@@ -254,13 +254,10 @@ class MEANFLOWAgent(flax.struct.PyTreeNode):
             encoders['actor_bc_flow'] = encoder_module()
 
         if config['use_DiT']:
-            actor_bc_flow_def = MFDiT_REAL(
-                hidden_dim=512,
-                depth=10,
-                num_heads=8,
+            model_cls = mf_dit_models[config['size_DiT']]
+            actor_bc_flow_def = model_cls(
                 output_dim=action_dim,  
                 output_len=action_len,
-                use_r=True,
                 encoder=encoders['actor_bc_flow']
             )
         else:
@@ -352,8 +349,9 @@ def get_config():
             flow_ratio=0.1,
             latent_dist='normal',
             use_DiT=False,
+            size_DiT='base',
             mf_method='jit_mf',
-            trainig_steps=1000000,
+            training_steps=1000000,
 
             ######### unused
             alpha=1.0,

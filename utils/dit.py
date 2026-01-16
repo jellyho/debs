@@ -640,3 +640,87 @@ class MFDiT_REAL(nn.Module):
             x = jnp.squeeze(x, axis=0)
             
         return x
+    
+import functools
+
+# 공통 기본 설정 (변경 가능)
+COMMON_CONFIG = {
+    'mlp_ratio': 4.0,
+    'tanh_squash': False,
+    'use_output_layernorm': False,
+    'use_r': True,
+}
+
+# -----------------------------------------------------------------------------
+# 1. Nano & Tiny (실시간 제어 최적화, 라즈베리파이/Jetson 등)
+# -----------------------------------------------------------------------------
+# 매우 가볍고 빠름. 데이터가 적을 때 Overfitting 방지에 유리함.
+MFDiT_Nano = functools.partial(
+    MFDiT_REAL,
+    hidden_dim=192,
+    depth=6,
+    num_heads=3, # head_dim = 64
+    **COMMON_CONFIG
+)
+
+MFDiT_Tiny = functools.partial(
+    MFDiT_REAL,
+    hidden_dim=384, # DiT-Small과 같지만 깊이를 얕게
+    depth=8,
+    num_heads=6, # head_dim = 64
+    **COMMON_CONFIG
+)
+
+# -----------------------------------------------------------------------------
+# 2. Small & Base (표준 DiT/ViT 구성, 4GB 데이터셋에 가장 추천)
+# -----------------------------------------------------------------------------
+# DiT-S (Standard Small)
+MFDiT_Small = functools.partial(
+    MFDiT_REAL,
+    hidden_dim=384,
+    depth=12,
+    num_heads=6,
+    **COMMON_CONFIG
+)
+
+# DiT-B (Standard Base) - 가장 범용적임
+MFDiT_Base = functools.partial(
+    MFDiT_REAL,
+    hidden_dim=768,
+    depth=12,
+    num_heads=12,
+    **COMMON_CONFIG
+)
+
+# -----------------------------------------------------------------------------
+# 3. Large & XL (대규모 데이터/복잡한 태스크용)
+# -----------------------------------------------------------------------------
+# DiT-L (Large)
+MFDiT_Large = functools.partial(
+    MFDiT_REAL,
+    hidden_dim=1024,
+    depth=24,
+    num_heads=16,
+    **COMMON_CONFIG
+)
+
+# DiT-XL (Extra Large) - 현재 작성하신 기본값
+MFDiT_XL = functools.partial(
+    MFDiT_REAL,
+    hidden_dim=1152,
+    depth=28,
+    num_heads=16,
+    **COMMON_CONFIG
+)
+
+# -----------------------------------------------------------------------------
+# Model Registry
+# -----------------------------------------------------------------------------
+mf_dit_models = {
+    'nano': MFDiT_Nano,
+    'tiny': MFDiT_Tiny,
+    'small': MFDiT_Small,
+    'base': MFDiT_Base,
+    'large': MFDiT_Large,
+    'xl': MFDiT_XL,
+}
