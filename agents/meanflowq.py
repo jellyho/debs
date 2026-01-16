@@ -433,9 +433,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         if config['extract_method'] == 'onestep_ddpg':
             latent_actor_input_shape = (ex_observations, full_actions)
         else:
-            latent_actor_input_shape = (ex_observations)
-
-        print(ex_observations)
+            latent_actor_input_shape = (ex_observations,)
 
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times, ex_times)),

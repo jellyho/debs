@@ -314,9 +314,6 @@ class ActorVectorField(nn.Module):
         """
         
         inputs = []
-        if not is_encoded and self.encoder is not None:
-            observations = self.encoder(observations)
-        inputs.append(observations)
 
         if self.encoder is not None:
             if isinstance(observations, (dict, flax.core.FrozenDict)):
@@ -410,12 +407,22 @@ class ActorMeanFlowField(nn.Module):
             is_encoded: Whether the observations are already encoded.
         """
         # 1. Encode observations if necessary
-        if not is_encoded and self.encoder is not None:
-            observations = self.encoder(observations)
+        inputs_list = []
+        if self.encoder is not None:
+            if isinstance(observations, (dict, flax.core.FrozenDict)):
+                if not is_encoded:
+                    img_embed = self.encoder(observations['image'])
+                else:
+                    img_embed = observations['image']
+                state = observations['state']
+                inputs = [img_embed, state]
+            else:
+                inputs = [self.encoder(observations)]
+        else:
+            inputs = [observations]
 
         # 3. Construct Input List
-        inputs_list = [observations, actions]
-
+        inputs_list.append(actions)
 
         if t is not None:
             if self.use_fourier_features:
