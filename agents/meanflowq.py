@@ -502,7 +502,11 @@ def get_config():
             batch_size=256,  # Batch size.
             actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
             critic_hidden_dims=(256, 256, 256, 256),  # Value network hidden dimensions.
+<<<<<<< Updated upstream
             latent_actor_hidden_dims=(256, 256),
+=======
+            latent_actor_hidden_dims=(256, 256, 256, 256),
+>>>>>>> Stashed changes
             layer_norm=True,  # Whether to use layer normalization.
             actor_layer_norm=False,  # Whether to use layer normalization for the actor.
             discount=0.99,  # Discount factor.

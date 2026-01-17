@@ -22,9 +22,14 @@ python main.py \
     --seed $7 \
     --agent.encoder "impala_small" \
     --p_aug=0.5 \
+<<<<<<< Updated upstream
     --agent.extract_method "ddpg" \
     --agent.mf_method "jit_mf" \
     --agent.use_DiT
+=======
+    --agent.extract_method "onestep_ddpg" \
+    --agent.mf_method "jit_mf"
+>>>>>>> Stashed changes
     
     # --agent.weight_decay 0.1 \
 

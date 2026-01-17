@@ -350,9 +350,14 @@ def get_config():
             flow_ratio=0.25,
             latent_dist='normal',
             use_DiT=False,
+<<<<<<< Updated upstream
             size_DiT='base',
             mf_method='jit_mf',
             training_steps=1000000,
+=======
+            size_DiT='',
+            mf_method='mf',
+>>>>>>> Stashed changes
 
             ######### unused
             alpha=1.0,

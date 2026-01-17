@@ -22,6 +22,7 @@ python main.py \
     --agent.mf_method $7 \
     --agent.flow_ratio 0.25 \
     --agent.alpha $4 \
+    # --agent.weight_decay 1e-4
     # --agent.use_DiT
     
     
