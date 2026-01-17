@@ -308,15 +308,21 @@ class FMLQLAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ex_times = ex_observations[..., :1]
-        ob_dims = ex_observations.shape[-1:]
+        leaf_ndims = jax.tree_util.tree_map(
+            lambda x: x.ndim - 1,
+            ex_observations
+        )
+        config['leaf_ndims'] = leaf_ndims
+
         action_dim = ex_actions.shape[-1]
+        action_len = ex_actions.shape[1]
 
         full_actions = jnp.reshape(
             ex_actions,
             (ex_actions.shape[0], -1)
         )
         full_action_dim = full_actions.shape[-1]
+        ex_times = full_actions[..., :1]
 
         # Define encoders.
         encoders = dict()
@@ -324,6 +330,7 @@ class FMLQLAgent(flax.struct.PyTreeNode):
             encoder_module = encoder_modules[config['encoder']]
             encoders['critic'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()
+            encoders['latent_actor'] = encoder_module()
 
         # Define networks.
         critic_def = Value(
@@ -344,7 +351,7 @@ class FMLQLAgent(flax.struct.PyTreeNode):
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_onestep_flow'),
+            encoder=encoders.get('latent_actor'),
             latent_dist=config['latent_dist']
         )
 
