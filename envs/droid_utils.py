@@ -103,13 +103,13 @@ def load_droid_dataset(
                 masks[-1] = 0.0 # Standard RL: do not bootstrap at terminal state
                 
                 if is_success:
-                    # Success: Give 0 reward at the last step (Goal reached)
-                    rewards[-2:] = 0.0
+                    # Success: Give 0 reward at the last step (0.5s) (Goal reached)
+                    rewards[-6:] = 0.0
                 else:
                     # Failure: Apply user specific logic
                     # User asked for: -1 * (1 - discount) at the last step
                     # Note: Usually in RL failure is just -1, but following instruction strictly:
-                    rewards[-2:] = -1.0 * (1.0 - discount)
+                    rewards[-6:] = -1.0 * (1.0 - discount)
                 
                 # Append to lists
                 data_lists['observations']['state'].append(state)
