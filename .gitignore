@@ -11,3 +11,4 @@ exp/
 plots/
 wandb/ 
 eval_logs/
+*.mp4

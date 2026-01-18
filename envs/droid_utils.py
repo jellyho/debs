@@ -95,21 +95,23 @@ def load_droid_dataset(
                 # --- 5. Reward & Terminal Logic ---
                 # Basic Step Reward: -1 per step
                 rewards = np.full((traj_len,), -1.0, dtype=np.float32)
+                # rewards = np.full((traj_len,), 0.0, dtype=np.float32)
                 terminals = np.zeros((traj_len,), dtype=np.float32)
                 masks = np.ones((traj_len,), dtype=np.float32)
                 
                 # Terminal Handling
                 terminals[-1] = 1.0
-                masks[-1] = 0.0 # Standard RL: do not bootstrap at terminal state
+                masks[-2:] = 0.0 # Standard RL: do not bootstrap at terminal state
                 
                 if is_success:
                     # Success: Give 0 reward at the last step (0.5s) (Goal reached)
-                    rewards[-6:] = 0.0
+                    rewards[-2:] = 0.0
+                    # rewards[-2:] = 1.0
                 else:
                     # Failure: Apply user specific logic
                     # User asked for: -1 * (1 - discount) at the last step
                     # Note: Usually in RL failure is just -1, but following instruction strictly:
-                    rewards[-6:] = -1.0 * (1.0 - discount)
+                    rewards[-2:] = -1.0 * (1.0 - discount)
                 
                 # Append to lists
                 data_lists['observations']['state'].append(state)
