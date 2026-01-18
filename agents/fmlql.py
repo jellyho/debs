@@ -8,7 +8,7 @@ import ml_collections
 import optax
 
 from utils.encoders import encoder_modules
-from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
+from utils.flax_utils import ModuleDict, TrainState, nonpytree_field, get_batch_shape
 from utils.networks import ActorVectorField, Value
 
 class FMLQLAgent(flax.struct.PyTreeNode):
@@ -248,11 +248,12 @@ class FMLQLAgent(flax.struct.PyTreeNode):
         rng=None,
     ):
         latent_dim = self.config["horizon_length"] * self.config["action_dim"]
+        batch_shape = get_batch_shape(observations, self.config['leaf_ndims'])
         rng, x_rng = jax.random.split(rng, 2)
 
         if self.config['extract_method'] == 'onestep_ddpg':
             rng, x_rng = jax.random.split(rng, 2)
-            e = self.sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim))
+            e = self.sample_latent_dist(x_rng, (*batch_shape, latent_dim))
             noises = self.network.select('latent_actor')(
                 observations, 
                 e,
@@ -265,8 +266,7 @@ class FMLQLAgent(flax.struct.PyTreeNode):
         actions = self.compute_flow_actions(observations, noises)
         actions = jnp.reshape(
             actions, 
-            (*observations.shape[: -len(self.config['ob_dims'])],  # batch_size
-            self.config["horizon_length"], self.config["action_dim"])
+            (*batch_shape, self.config["horizon_length"], self.config["action_dim"])
         )
         actions = jnp.clip(actions, -1, 1)
         return actions
@@ -283,7 +283,7 @@ class FMLQLAgent(flax.struct.PyTreeNode):
         actions = noises
         # Euler method.
         for i in range(self.config['flow_steps']):
-            t = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps'])
+            t = jnp.full(noises[..., :1].shape, i / self.config['flow_steps'])
             vels = self.network.select('actor_bc_flow')(observations, actions, t, is_encoded=True)
             actions = actions + vels / self.config['flow_steps']
         actions = jnp.clip(actions, -1, 1)
@@ -381,13 +381,19 @@ class FMLQLAgent(flax.struct.PyTreeNode):
         else:
             network_tx = optax.adam(learning_rate=config['lr'])
 
-        network_params = network_def.init(init_rng, **network_args)['params']
-        network = TrainState.create(network_def, network_params, tx=network_tx)
+        variables = network_def.init(init_rng, **network_args)
+        network_params = variables['params']
+        batch_stats = variables.get('batch_stats', flax.core.FrozenDict({}))
+        network = TrainState.create(
+            network_def, 
+            network_params, 
+            tx=network_tx,
+            batch_stats=batch_stats
+        )
 
         params = network.params
-        params[f'modules_target_critic'] = params[f'modules_critic']
 
-        config['ob_dims'] = ob_dims
+        # config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim
 
         return cls(rng, network=network, config=flax.core.FrozenDict(**config))

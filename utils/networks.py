@@ -324,7 +324,10 @@ class ActorVectorField(nn.Module):
                 state = observations['state']
                 inputs = [img_embed, state]
             else:
-                inputs = [self.encoder(observations)]
+                if not is_encoded:
+                    inputs = [self.encoder(observations)]
+                else:
+                    inputs = [observations]
         else:
             inputs = [observations]
 

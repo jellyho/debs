@@ -27,8 +27,9 @@
 export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_A6000,gigabyte_A6000,ASUS_RTX6000ADA,TYAN_A6000,gigabyte_A5000,ASUS_A5000'
 export QOS='big_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="ACFQLFINAL_BIG"
-export MODEL="qclql"
+export JOBNAME="DSRL_FINAL"
+export MODEL="dsrl"
+export alpha="1.0"
 
 for task_num in "1" "2" "3" "4" "5"; do
     for latent in "sphere" "normal"; do

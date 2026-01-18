@@ -4,8 +4,8 @@
 export PART='big_suma_rtx3090'
 export QOS='big_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="jit_mf_large"
-export MODEL="meanflowq"
+export JOBNAME="DSRL_FINAL"
+export MODEL="dsrl"
 
 
 for task_num in "1" "2" "3" "4" "5"; do

@@ -8,7 +8,7 @@ import ml_collections
 import optax
 
 from utils.encoders import encoder_modules
-from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
+from utils.flax_utils import ModuleDict, TrainState, nonpytree_field, get_batch_shape
 from utils.networks import ActorVectorField, Value
 
 class DSRLAgent(flax.struct.PyTreeNode):
@@ -224,8 +224,10 @@ class DSRLAgent(flax.struct.PyTreeNode):
         rng=None,
     ):
         latent_dim = self.config["horizon_length"] * self.config["action_dim"]
+        batch_shape = get_batch_shape(observations, self.config['leaf_ndims'])
+
         rng, x_rng = jax.random.split(rng, 2)
-        e = self.sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim))
+        e = self.sample_latent_dist(x_rng, (*batch_shape, latent_dim))
         noises = self.network.select('latent_actor')(
             observations, 
             e,
@@ -233,8 +235,7 @@ class DSRLAgent(flax.struct.PyTreeNode):
         actions = self.compute_flow_actions(observations, noises)
         actions = jnp.reshape(
             actions, 
-            (*observations.shape[: -len(self.config['ob_dims'])],  # batch_size
-            self.config["horizon_length"], self.config["action_dim"])
+            (*batch_shape, self.config["horizon_length"], self.config["action_dim"])
         )
         actions = jnp.clip(actions, -1, 1)
         return actions
@@ -251,7 +252,7 @@ class DSRLAgent(flax.struct.PyTreeNode):
         actions = noises
         # Euler method.
         for i in range(self.config['flow_steps']):
-            t = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps'])
+            t = jnp.full(noises[..., :1].shape, i / self.config['flow_steps'])
             vels = self.network.select('actor_bc_flow')(observations, actions, t, is_encoded=True)
             actions = actions + vels / self.config['flow_steps']
         actions = jnp.clip(actions, -1, 1)
@@ -276,15 +277,21 @@ class DSRLAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ex_times = ex_observations[..., :1]
-        ob_dims = ex_observations.shape[-1:]
+        leaf_ndims = jax.tree_util.tree_map(
+            lambda x: x.ndim - 1,
+            ex_observations
+        )
+        config['leaf_ndims'] = leaf_ndims
+
         action_dim = ex_actions.shape[-1]
+        action_len = ex_actions.shape[1]
 
         full_actions = jnp.reshape(
             ex_actions,
             (ex_actions.shape[0], -1)
         )
         full_action_dim = full_actions.shape[-1]
+        ex_times = full_actions[..., :1]
 
         # Define encoders.
         encoders = dict()
@@ -324,7 +331,7 @@ class DSRLAgent(flax.struct.PyTreeNode):
             latent_dist=config['latent_dist']
         )
 
-        latent_actor_input_shape = (ex_observations, full_actions)
+        latent_actor_input_shape = (ex_observations,)
 
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
@@ -348,13 +355,19 @@ class DSRLAgent(flax.struct.PyTreeNode):
         else:
             network_tx = optax.adam(learning_rate=config['lr'])
 
-        network_params = network_def.init(init_rng, **network_args)['params']
-        network = TrainState.create(network_def, network_params, tx=network_tx)
+        variables = network_def.init(init_rng, **network_args)
+        network_params = variables['params']
+        batch_stats = variables.get('batch_stats', flax.core.FrozenDict({}))
+        network = TrainState.create(
+            network_def, 
+            network_params, 
+            tx=network_tx,
+            batch_stats=batch_stats
+        )
 
         params = network.params
-        params[f'modules_target_critic'] = params[f'modules_critic']
 
-        config['ob_dims'] = ob_dims
+        # config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim
 
         return cls(rng, network=network, config=flax.core.FrozenDict(**config))
@@ -385,11 +398,10 @@ def get_config():
             fourier_feature_dim=64,
             weight_decay=0.,
             latent_dist='uniform',
-            extract_method='ddpg', # 'ddpg', 'awr',,
 
             ## unsued
             mf_method='unused',
-            
+            extract_method='ddpg', # 'ddpg', 'awr',,
         )
     )
     return config
