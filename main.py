@@ -33,9 +33,9 @@ flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
 
 flags.DEFINE_integer('offline_steps', 1000000, 'Number of online steps.')
 flags.DEFINE_integer('buffer_size', 2000000, 'Replay buffer size.')
-flags.DEFINE_integer('log_interval', 10, 'Logging interval.')
+flags.DEFINE_integer('log_interval', 5000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 100000, 'Evaluation interval.')
-flags.DEFINE_integer('save_interval', 100000, 'Save interval.')
+flags.DEFINE_integer('save_interval', 1000000, 'Save interval.')
 flags.DEFINE_integer('start_training', 5000, 'when does training start')
 
 flags.DEFINE_integer('utd_ratio', 1, "update to data ratio")
@@ -208,7 +208,8 @@ def main(_):
     train_dataset = process_train_dataset(train_dataset)
     example_batch = train_dataset.sample(config['batch_size'])
 
-    save_example_batch(example_batch, FLAGS.save_dir)
+    if config.get('use_DiT', False):
+        save_example_batch(example_batch, FLAGS.save_dir)
 
     def print_batch_shapes(batch, prefix=""):
         for k, v in batch.items():

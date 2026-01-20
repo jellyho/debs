@@ -32,21 +32,34 @@ export MODEL="dsrl"
 export alpha="1.0"
 
 for task_num in "1" "2" "3" "4" "5"; do
-    for latent in "sphere" "normal"; do
+    for latent in "normal"; do
         for task in "cube-single-play" "cube-double-play" "scene-play" "puzzle-3x3-play" "puzzle-4x4-play"; do
             for seed in "100" "200" "300"; do
                 echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
-                sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+                sbatch -p ${PART} -q ${QOS} --exclude=node19,node08,node16 --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
             done
         done
     done
 done
 
-# for latent in "sphere"; do
-#     for task in "lift" "can" "square"; do
-#         for seed in "100"; do
-#             echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
-#             sbatch -p ${PART} -q ${QOS} --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_robomimic.sh ${task} ${MODEL} ${latent} 1.0 ${JOBNAME} ${seed}
-#         done
-#     done
-# done
+for task_num in "3" "4" "5"; do
+    for latent in "sphere"; do
+        for task in "cube-single-play" "cube-double-play" "scene-play"; do
+            for seed in "100" "200" "300"; do
+                echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+                sbatch -p ${PART} -q ${QOS} --exclude=node19,node08,node16 --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+            done
+        done
+    done
+done
+
+for task_num in "2" "3" "4" "5"; do
+    for latent in "sphere"; do
+        for task in "puzzle-3x3-play" "puzzle-4x4-play"; do
+            for seed in "100" "200" "300"; do
+                echo "${JOBNAME}_${task_num}_${latent}_${task}_${seed}"
+                sbatch -p ${PART} -q ${QOS} --exclude=node19,node08,node16 --gres=gpu:1 -J ${JOBNAME}_${task}_${seed} -o ~/.slurm_logs/${JOBNAME}_${task}_${seed}.log debs_ogbench.sh ${task} ${MODEL} ${latent} ${alpha} ${JOBNAME} ${task_num} ${seed}
+            done
+        done
+    done
+done

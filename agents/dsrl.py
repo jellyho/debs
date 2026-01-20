@@ -117,25 +117,20 @@ class DSRLAgent(flax.struct.PyTreeNode):
         
         ### Query latent actor
         rng, x_rng, l_rng = jax.random.split(rng, 3)
-        e = self.sample_latent_dist(x_rng, (batch_size, latent_dim))
         z_pred = self.network.select('latent_actor')(
             observations, 
-            e,
             rng=l_rng,
             params=grad_params # <--- Gradients flow here
         )
-        x_pred = self.compute_flow_actions(observations, e)
-        a_pred_flat = jnp.reshape(x_pred, (batch_size, latent_dim))
+        # Q(s, a)
+        qs = self.network.select('noise_critic')(
+            observations,
+            z_pred.reshape(batch_size, -1)
+        )
 
         info_dict = {
             'z_norm': jnp.mean(jnp.square(z_pred)),
         }
-
-        # Q(s, a)
-        qs = self.network.select('critic')(
-            observations,
-            a_pred_flat.reshape(batch_size, -1)
-        )
 
         if self.config['num_critic'] > 1:
             q = jnp.mean(qs, axis=0)
@@ -148,16 +143,27 @@ class DSRLAgent(flax.struct.PyTreeNode):
         info_dict['latent_loss'] = q_loss
 
         # Noise Aliasing
+        e = self.sample_latent_dist(x_rng, (batch_size, latent_dim))
+        x_pred = self.compute_flow_actions(observations, e)
 
         noise_qs = self.network.select('noise_critic')(
             observations,
             e,
             params=grad_params
         )
-        alias_loss = jnp.mean(jnp.square((noise_qs - q)))
+        target_qs = self.network.select('critic')(
+            observations,
+            x_pred,
+            params=grad_params
+        )
 
+        if self.config['num_critic'] > 1:
+            target_q = jnp.mean(target_qs, axis=0)
+        else:
+            target_q = target_qs
+
+        alias_loss = jnp.mean(jnp.square((noise_qs - target_q)))
         info_dict['alias_loss'] = alias_loss
-
         loss = q_loss + alias_loss
 
         return loss, info_dict
@@ -227,10 +233,8 @@ class DSRLAgent(flax.struct.PyTreeNode):
         batch_shape = get_batch_shape(observations, self.config['leaf_ndims'])
 
         rng, x_rng = jax.random.split(rng, 2)
-        e = self.sample_latent_dist(x_rng, (*batch_shape, latent_dim))
         noises = self.network.select('latent_actor')(
             observations, 
-            e,
         )
         actions = self.compute_flow_actions(observations, noises)
         actions = jnp.reshape(

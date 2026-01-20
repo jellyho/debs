@@ -30,7 +30,7 @@ export MODEL="meanflowq"
 # "cube-double-play" "scene-play" "puzzle-3x3-play" "puzzle-4x4-play"; do
 # "normal"
 for task_num in "1"; do
-    for latent in "sphere"; do
+    for latent in "normal"; do
         for task in "cube-single-play"; do
             for seed in "100" "200" "300"; do
                 for alpha in "3.0"; do
@@ -43,7 +43,7 @@ for task_num in "1"; do
 done
 
 for task_num in "1"; do
-    for latent in "sphere"; do
+    for latent in "normal"; do
         for task in "cube-double-play"; do
             for seed in "100" "200" "300"; do
                 for alpha in "0.3"; do
@@ -55,7 +55,7 @@ for task_num in "1"; do
     done
 done
 # for task_num in "1"; do
-#     for latent in "sphere"; do
+#     for latent in "normal"; do
 #         for task in "cube-double-play"; do
 #             for seed in "100" "200" "300"; do
 #                 for alpha in "3.0"; do
@@ -68,7 +68,7 @@ done
 # done
 
 for task_num in "1"; do
-    for latent in "sphere"; do
+    for latent in "normal"; do
         for task in "scene-play"; do
             for seed in "100" "200" "300"; do
                 for alpha in "0.3"; do
@@ -81,7 +81,7 @@ for task_num in "1"; do
 done
 
 for task_num in "1"; do
-    for latent in "sphere"; do
+    for latent in "normal"; do
         for task in "puzzle-3x3-play"; do
             for seed in "200" "300"; do
                 for alpha in "10.0"; do
@@ -93,7 +93,7 @@ for task_num in "1"; do
     done
 done
 # for task_num in "1"; do
-#     for latent in "sphere"; do
+#     for latent in "normal"; do
 #         for task in "puzzle-3x3-play"; do
 #             for seed in "100" "200" "300"; do
 #                 for alpha in "0.3"; do
@@ -106,7 +106,7 @@ done
 # done
 
 for task_num in "1"; do
-    for latent in "sphere"; do
+    for latent in "normal"; do
         for task in "puzzle-4x4-play"; do
             for seed in "100" "200" "300"; do
                 for alpha in "1.0"; do
