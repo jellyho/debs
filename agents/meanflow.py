@@ -356,7 +356,9 @@ def get_config():
 
             ######### unused
             alpha=1.0,
-            extract_method='unused'
+            extract_method='unused',
+            critic_hidden_dims='unused',
+            latent_actor_hidden_dims='unused'
         )
     )
     return config

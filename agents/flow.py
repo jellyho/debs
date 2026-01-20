@@ -298,7 +298,9 @@ def get_config():
             flow_ratio=0.25,
             mf_method='jit_mf',
             alpha=1.0,
-            extract_method='unused'
+            extract_method='unused',
+            critic_hidden_dims='unused',
+            latent_actor_hidden_dims='unused'
         )
     )
     return config
