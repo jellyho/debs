@@ -113,7 +113,7 @@ class DSRLAgent(flax.struct.PyTreeNode):
     
     def latent_actor_loss(self, batch, grad_params, rng):
         observations = batch['observations']
-        batch_size = observations.shape[0]
+        batch_size = batch['actions'].shape[0]
         latent_dim = self.config['action_dim'] * self.config['horizon_length']
         
         ### Query latent actor
@@ -257,7 +257,7 @@ class DSRLAgent(flax.struct.PyTreeNode):
                 observations['image'] = self.network.select('actor_bc_flow_encoder')(observations['image'])
             else:
                 observations = self.network.select('actor_bc_flow_encoder')(observations)
-                
+
         actions = noises
         # Euler method.
         for i in range(self.config['flow_steps']):
