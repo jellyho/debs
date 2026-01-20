@@ -14,13 +14,15 @@ python main.py \
     --eval_interval 100000 \
     --eval_episodes 50 \
     --video_episodes 10 \
-    --agent.extract_method "ddpg" \
+    --agent.extract_method ${10} \
     --offline_steps 1000000 \
     --save_dir "exp/" \
     --agent.num_critic 2 \
     --agent.latent_dist "$3" \
     --agent.alpha $4 \
     --seed $7 \
+    --agent.latent_actor_hidden_dims $8 \
+    --agent.critic_agg $9
     # --agent.weight_decay 0.1
     # --agent.extract_method "ddpg" \
 

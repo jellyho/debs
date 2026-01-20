@@ -24,8 +24,8 @@
 export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_A6000,gigabyte_A6000,gigabyte_A5000'
 export QOS='big_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="_VISUAL_TUNE"
-export MODEL="meanflowq"
+export JOBNAME="qcmfql_VISUAL_TUNE"
+export MODEL="qcmfql"
 
 # "cube-double-play" "scene-play" "puzzle-3x3-play" "puzzle-4x4-play"; do
 # "normal"

@@ -284,7 +284,8 @@ def main(_):
                         wandb.log({
                             f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
                         }, step=log_step)
-            save_agent(agent, FLAGS.save_dir, log_step)
+            if config.get('use_DiT', False):
+                save_agent(agent, FLAGS.save_dir, log_step)
 
 if __name__ == '__main__':
     app.run(main)

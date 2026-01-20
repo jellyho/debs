@@ -9,8 +9,10 @@ import optax
 
 from agents.meanflow_utils import adaptive_l2_loss, sample_t_r, sample_latent_dist
 from utils.encoders import encoder_modules
-from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
+from utils.flax_utils import ModuleDict, TrainState, nonpytree_field, get_batch_shape
 from utils.networks import ActorMeanFlowField, Value, ActorVectorField
+from utils.dit import mf_dit_models
+
 
 class QCMFQLAgent(flax.struct.PyTreeNode):
     """Don't extract but select! with action chunking. 
