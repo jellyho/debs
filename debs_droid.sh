@@ -6,7 +6,7 @@ python main.py \
     --agent "agents/$2.py" \
     --project "MFQ_DROID" \
     --run_group "$2:$5" \
-    --droid_dataset_dir "/data5/jellyho/droid_rl/" \
+    --droid_dataset_dir "$7" \
     --task_name $1 \
     --task_num 0 \
     --env_name "$1" \
@@ -17,9 +17,8 @@ python main.py \
     --eval_episodes 50 \
     --video_episodes 10 \
     --offline_steps 10000 \
-    --save_dir "exp/" \
+    --save_dir "/scratch/jellyho/lql_ckpts/" \
     --agent.num_critic 2 \
-    --agent.latent_dist "$3" \
     --agent.alpha $4 \
     --agent.extract_method "ddpg" \
     --agent.mf_method "jit_mf" \

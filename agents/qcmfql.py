@@ -113,7 +113,7 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
 
     def onestep_actor_loss(self, batch, grad_params, rng):
         observations = batch['observations']
-        batch_size = observations.shape[0]
+        batch_size = batch['actions'].shape[0]
         latent_dim = self.config['action_dim'] * self.config['horizon_length']
         
         ### Query latent actor
@@ -235,10 +235,10 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         Note: CFG logic and step size are handled inside 'compute_flow_actions' using self.config.
         """
         latent_dim = self.config["horizon_length"] * self.config["action_dim"]
+        batch_shape = get_batch_shape(observations, self.config['leaf_ndims'])
 
-        # if self.config['noisy_latent_actor']:
         rng, x_rng = jax.random.split(rng, 2)
-        e = sample_latent_dist(x_rng, (*observations.shape[: -len(self.config['ob_dims'])], latent_dim), self.config['latent_dist'])
+        e = sample_latent_dist(x_rng, (*batch_shape, latent_dim), self.config['latent_dist'])
         
         actions = self.network.select('onestep_actor')(
             observations, 
@@ -248,7 +248,7 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         actions = jnp.clip(actions, -1, 1)
         actions = jnp.reshape(
             actions, 
-            (*observations.shape[: -len(self.config['ob_dims'])],  # batch_size
+            (*batch_shape,  # batch_size
             self.config["horizon_length"], self.config["action_dim"])
         )
             
@@ -264,8 +264,8 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         # if self.config['encoder'] is not None:
         #     observations = self.network.select('actor_bc_flow_encoder')(observations)
 
-        t = jnp.ones((*observation.shape[: -len(self.config['ob_dims'])], 1))
-        r = jnp.zeros((*observation.shape[: -len(self.config['ob_dims'])], 1))
+        t = jnp.ones_like((noise[..., :1]))
+        r = jnp.zeros_like((noise[..., :1]))
         
         output = self.network.select('actor_bc_flow')(
             observation,
@@ -296,10 +296,16 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ob_dims = ex_observations.shape[1:]
+        leaf_ndims = jax.tree_util.tree_map(
+            lambda x: x.ndim - 1,
+            ex_observations
+        )
+        config['leaf_ndims'] = leaf_ndims
+
+        # ob_dims = ex_observations.shape[1:]
         action_dim = ex_actions.shape[-1]
+        action_len = ex_actions.shape[1]
         
-        # full_actions = jnp.concatenate([ex_actions] * config["horizon_length"], axis=-1)
         full_actions = jnp.reshape(
             ex_actions,
             (ex_actions.shape[0], -1)
@@ -322,12 +328,23 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
             encoder=encoders.get('critic'),
         )
 
-        actor_bc_flow_def = ActorMeanFlowField(
-            hidden_dims=config['actor_hidden_dims'],
-            action_dim=full_action_dim,
-            layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_bc_flow'),
-        )
+        if config['use_DiT']:
+            model_cls = mf_dit_models[config['size_DiT']]
+            actor_bc_flow_def = model_cls(
+                output_dim=action_dim,  
+                output_len=action_len,
+                encoder=encoders['actor_bc_flow'],
+                use_r=True
+            )
+        else:
+            actor_bc_flow_def = ActorMeanFlowField(
+                hidden_dims=config['actor_hidden_dims'],
+                action_dim=full_action_dim,
+                layer_norm=config['actor_layer_norm'],
+                encoder=encoders.get('actor_bc_flow'),
+                use_fourier_features=config['use_fourier_features'],
+                fourier_feature_dim=config['fourier_feature_dim']
+            )
 
         onestep_actor_def = ActorVectorField(
             hidden_dims=config['actor_hidden_dims'],
@@ -344,7 +361,11 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         )
 
         if encoders.get('actor_bc_flow') is not None:
-            network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
+            # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
+            if isinstance(ex_observations, (dict, flax.core.FrozenDict)):
+                network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations['image'],))
+            else:
+                network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
 
         networks = {k: v[0] for k, v in network_info.items()}
         network_args = {k: v[1] for k, v in network_info.items()}
@@ -354,15 +375,36 @@ class QCMFQLAgent(flax.struct.PyTreeNode):
         if config["weight_decay"] > 0.:
             network_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
         else:
-            network_tx = optax.adam(learning_rate=config['lr'])
+            if config['use_DiT']:
+                warmup_steps = int(config['training_steps'] * 0.01)
+                decay_steps = config['training_steps'] - warmup_steps
+                lr_schedule = optax.warmup_cosine_decay_schedule(
+                    init_value=0.0,             # Warmup 시작 LR (보통 0)
+                    peak_value=config['lr'],    # Warmup 끝난 후 도달할 최대 LR
+                    warmup_steps=warmup_steps,
+                    decay_steps=decay_steps, # 전체 감쇠 기간
+                    end_value=config['lr'] / 10 # 학습 끝날 때 LR (보통 peak의 1/10 ~ 0)
+                )
+                network_tx = optax.chain(
+                    optax.clip_by_global_norm(1.0),
+                    optax.adam(learning_rate=lr_schedule),
+                )
+            else:
+                network_tx = optax.adam(learning_rate=config['lr'])
 
-        network_params = network_def.init(init_rng, **network_args)['params']
-        network = TrainState.create(network_def, network_params, tx=network_tx)
+        variables = network_def.init(init_rng, **network_args)
+        network_params = variables['params']
+        batch_stats = variables.get('batch_stats', flax.core.FrozenDict({}))
+        network = TrainState.create(
+            network_def, 
+            network_params, 
+            tx=network_tx,
+            batch_stats=batch_stats
+        )
 
         params = network.params
-        params[f'modules_target_critic'] = params[f'modules_critic']
 
-        config['ob_dims'] = ob_dims
+        # config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim
 
         return cls(rng, network=network, config=flax.core.FrozenDict(**config))
@@ -389,12 +431,16 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
-            latent_dist='uniform',
+            latent_dist='normal',
             alpha=1.0,
             flow_ratio=0.25,
+            training_steps=10000,
+            use_DiT=False,
+            size_DiT='base',
             
             ####### Unused parameters for compatibility #######
             extract_method="unused",
+            mf_method="unused"
         )
     )
     return config
