@@ -4,8 +4,8 @@
 export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_A6000,gigabyte_A6000,gigabyte_A5000'
 export QOS='big_qos'
 export MUJOCO_GL='egl'
-export JOBNAME="mflql_debug"
-export MODEL="meanflow"
+export JOBNAME="flow_debug"
+export MODEL="flow"
 export lahd="(256,256)"
 export critic_agg="min"
 export extract_method="ddpg"
