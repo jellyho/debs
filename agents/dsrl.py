@@ -402,6 +402,7 @@ class DSRLAgent(flax.struct.PyTreeNode):
         )
 
         params = network.params
+        params[f'modules_target_critic'] = params[f'modules_critic']
 
         # config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim

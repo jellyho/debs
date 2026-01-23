@@ -186,6 +186,7 @@ def main(_):
     # house keeping
     random.seed(FLAGS.seed)
     np.random.seed(FLAGS.seed)
+    rng = jax.random.PRNGKey(np.random.randint(0, 2**32))
 
     log_step = 0
     
@@ -232,20 +233,20 @@ def main(_):
     train_dataset = process_train_dataset(train_dataset)
     example_batch = train_dataset.sample(config['batch_size'])
 
-    if config.get('use_DiT', False):
-        save_example_batch(example_batch, FLAGS.save_dir)
+    # if config.get('use_DiT', False):
+        # save_example_batch(example_batch, FLAGS.save_dir)
 
-    def print_batch_shapes(batch, prefix=""):
-        for k, v in batch.items():
-            try:
-                print(f"{prefix}{k}: {v.shape}")
-            except (AttributeError, TypeError):
-                if isinstance(v, dict):
-                    print_batch_shapes(v, prefix=f"{prefix}{k}.")
-                else:
-                    pass
+    # def print_batch_shapes(batch, prefix=""):
+    #     for k, v in batch.items():
+    #         try:
+    #             print(f"{prefix}{k}: {v.shape}")
+    #         except (AttributeError, TypeError):
+    #             if isinstance(v, dict):
+    #                 print_batch_shapes(v, prefix=f"{prefix}{k}.")
+    #             else:
+    #                 pass
 
-    print_batch_shapes(example_batch)
+    # print_batch_shapes(example_batch)
 
     is_droid = True if FLAGS.droid_dataset_dir is not None else False
 
@@ -258,12 +259,9 @@ def main(_):
         config,
     )
 
-    print_param_stats(agent)
+    print(agent.config['leaf_ndims'])
 
-    # Setup logging.
-    prefixes = ["eval", "env"]
-    if FLAGS.offline_steps > 0:
-        prefixes.append("offline_agent")
+    # print_param_stats(agent)
 
     logger = LoggingHelper(
         wandb_logger=wandb,
@@ -272,13 +270,24 @@ def main(_):
 
     ex_obs = example_batch['observations']
     if isinstance(ex_obs, (dict, flax.core.FrozenDict)):
-        dummy_obs_img = jax.tree_map(lambda x: x[:1], example_batch['observations']['image'])
-        dummy_obs_state = jax.tree_map(lambda x: x[:1], example_batch['observations']['state'])
-        dummy_obs = {'observations':{'image':dummy_obs_img, 'state':dummy_obs_state}}
+        dummy_obs_img = example_batch['observations']['image'][0]
+        dummy_obs_state = example_batch['observations']['state'][0]
+        dummy_obs = {'image':dummy_obs_img, 'state':dummy_obs_state}
     else:
-        dummy_obs = jax.tree_map(lambda x: x[:1], example_batch['observations'])
-    _ = agent.sample_actions(dummy_obs)
-    jax.tree_map(lambda x: x.block_until_ready(), _)
+        dummy_obs = jax.tree.map(lambda x: x[0], example_batch['observations'])
+    
+    print('warmup inference')
+    _ = agent.sample_actions(dummy_obs, rng=rng)
+    jax.tree.map(lambda x: x.block_until_ready(), _)
+
+    print('warmup training')
+    agent, info = agent.update(example_batch)
+    if info:
+        jax.tree.map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else None, info)
+    else:
+        # info가 비어있다면 파라미터를 block
+        jax.tree.map(lambda x: x.block_until_ready(), agent.network.params)
+
 
     # Offline RL
     for i in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):
@@ -288,18 +297,18 @@ def main(_):
         agent, info = agent.update(batch)
 
         if info:
-            jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else None, info)
+            jax.tree.map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else None, info)
         else:
             # info가 비어있다면 파라미터를 block
-            jax.tree_util.tree_map(lambda x: x.block_until_ready(), agent.network.params)
+            jax.tree.map(lambda x: x.block_until_ready(), agent.network.params)
 
-        step_time = time.time() - t0
+        step_time = (time.time() - t0) * 1000
 
         if i % FLAGS.log_interval == 0:
             # --- [2. Pure Inference Time 측정 (선택 사항)] ---
             # 학습 중간에 순수 추론(Action Sampling) 속도만 따로 재고 싶을 때
             t_inf_start = time.time()
-            inf_actions = agent.sample_actions(dummy_obs) # 배치 사이즈 1 기준
+            inf_actions = agent.sample_actions(dummy_obs, rng=rng) # 배치 사이즈 1 기준
             inf_actions.block_until_ready() # 필수
             inference_latency_ms = (time.time() - t_inf_start) * 1000
             # ------------------------------------------------

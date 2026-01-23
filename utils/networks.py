@@ -314,7 +314,6 @@ class ActorVectorField(nn.Module):
         """
         
         inputs = []
-
         if self.encoder is not None:
             if isinstance(observations, (dict, flax.core.FrozenDict)):
                 if not is_encoded:
@@ -418,11 +417,11 @@ class ActorMeanFlowField(nn.Module):
                 else:
                     img_embed = observations['image']
                 state = observations['state']
-                inputs = [img_embed, state]
+                inputs_list = [img_embed, state]
             else:
-                inputs = [self.encoder(observations)]
+                inputs_list = [self.encoder(observations)]
         else:
-            inputs = [observations]
+            inputs_list = [observations]
 
         # 3. Construct Input List
         inputs_list.append(actions)

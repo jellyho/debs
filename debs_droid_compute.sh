@@ -17,7 +17,7 @@ python main_compute.py \
     --eval_episodes 50 \
     --video_episodes 10 \
     --offline_steps 10000 \
-    --save_dir "/scratch/jellyho/lql_ckpts/" \
+    --save_dir "$8" \
     --agent.num_critic 2 \
     --agent.alpha $4 \
     --agent.extract_method "ddpg" \
