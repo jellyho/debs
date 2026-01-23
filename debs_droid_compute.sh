@@ -16,7 +16,7 @@ python main_compute.py \
     --save_interval 100000 \
     --eval_episodes 50 \
     --video_episodes 10 \
-    --offline_steps 10000 \
+    --offline_steps 3000 \
     --save_dir "$8" \
     --agent.num_critic 2 \
     --agent.alpha $4 \

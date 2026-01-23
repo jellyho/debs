@@ -275,18 +275,6 @@ def main(_):
         dummy_obs = {'image':dummy_obs_img, 'state':dummy_obs_state}
     else:
         dummy_obs = jax.tree.map(lambda x: x[0], example_batch['observations'])
-    
-    print('warmup inference')
-    _ = agent.sample_actions(dummy_obs, rng=rng)
-    jax.tree.map(lambda x: x.block_until_ready(), _)
-
-    print('warmup training')
-    agent, info = agent.update(example_batch)
-    if info:
-        jax.tree.map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else None, info)
-    else:
-        # info가 비어있다면 파라미터를 block
-        jax.tree.map(lambda x: x.block_until_ready(), agent.network.params)
 
 
     # Offline RL
