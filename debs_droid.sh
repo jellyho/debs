@@ -10,14 +10,14 @@ python main.py \
     --task_name $1 \
     --task_num 0 \
     --env_name "$1" \
-    --horizon_length 5 \
+    --horizon_length 10 \
     --agent.lr 3e-4 \
     --eval_interval 2000 \
     --save_interval 2000 \
     --eval_episodes 50 \
     --video_episodes 10 \
     --offline_steps 10000 \
-    --save_dir "/scratch/jellyho/lql_ckpts/" \
+    --save_dir $8 \
     --agent.num_critic 2 \
     --agent.alpha $4 \
     --agent.extract_method "ddpg" \

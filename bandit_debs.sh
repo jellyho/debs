@@ -3,7 +3,7 @@
 MUJOCO_GL=egl
 python main.py \
     --agent "agents/$2.py" \
-    --project "debs" \
+    --project "debs_bandit" \
     --run_group=$2:$5 \
     --env_name="bandit-$1" \
     --horizon_length 1 \
