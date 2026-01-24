@@ -334,7 +334,7 @@ class FMLQLAgent(flax.struct.PyTreeNode):
 
         # Define networks.
         critic_def = Value(
-            hidden_dims=config['value_hidden_dims'],
+            hidden_dims=config['critic_hidden_dims'],
             layer_norm=config['layer_norm'],
             num_ensembles=config['num_critic'],
             encoder=encoders.get('critic'),
@@ -409,7 +409,7 @@ def get_config():
             lr=3e-4,  # Learning rate.
             batch_size=256,  # Batch size.
             actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
-            value_hidden_dims=(256, 256, 256, 256),  # Value network hidden dimensions.
+            critic_hidden_dims=(256, 256, 256, 256),  # Value network hidden dimensions.
             latent_actor_hidden_dims=(256, 256, 256, 256),
             layer_norm=True,  # Whether to use layer normalization.
             actor_layer_norm=False,  # Whether to use layer normalization for the actor.

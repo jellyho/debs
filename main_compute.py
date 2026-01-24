@@ -5,7 +5,7 @@ import flax
 # JAX import 전에 반드시 선언해야 합니다!
 os.environ['XLA_FLAGS'] = '--xla_gpu_strict_conv_algorithm_picker=false'
 # [추가] JAX가 메모리를 미리 다 잡지 않고 필요한 만큼만 쓰도록 설정 (VRAM 비교용)
-os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false' 
+# os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false' 
 
 
 
@@ -71,18 +71,23 @@ flags.DEFINE_bool('sparse', False, "make the task sparse reward")
 flags.DEFINE_bool('save_all_online_states', False, "save all trajectories to npy")
 flags.DEFINE_bool('record_time', False, "time_rocording")
 
-def get_vram_usage():
-    """Returns GPU memory usage in MB for the current device."""
+def get_jax_memory_usage():
+    """
+    JAX 내부 Allocator에서 실제 사용 중인 메모리 양을 가져옵니다.
+    PREALLOCATE=True 상태에서도 정확한 모델 사용량을 알 수 있습니다.
+    """
     try:
-        # nvidia-smi query to get memory usage
-        result = subprocess.check_output(
-            ['nvidia-smi', '--query-gpu=memory.used', '--format=csv,nounits,noheader'],
-            encoding='utf-8'
-        )
-        # Assuming single GPU usage for the script, take the first value
-        # 만약 CUDA_VISIBLE_DEVICES로 특정 GPU만 보인다면 첫번째가 맞습니다.
-        return float(result.strip().split('\n')[0])
+        # 첫 번째 GPU 디바이스 가져오기
+        device = jax.local_devices()[0] 
+        
+        # memory_stats()는 {'bytes_in_use': ..., 'bytes_limit': ...} 등을 반환
+        stats = device.memory_stats()
+        
+        # bytes를 MB로 변환
+        used_mb = stats['peak_bytes_in_use'] / (1024 ** 2)
+        return used_mb
     except Exception as e:
+        print(f"VRAM 측정 실패: {e}")
         return 0.0
 
 class LoggingHelper:
@@ -284,33 +289,34 @@ def main(_):
         t0 = time.time()
         agent, info = agent.update(batch)
 
-        if info:
-            jax.tree.map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else None, info)
-        else:
-            # info가 비어있다면 파라미터를 block
-            jax.tree.map(lambda x: x.block_until_ready(), agent.network.params)
+        if i != 0:
+            if info:
+                jax.tree.map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else None, info)
+            else:
+                # info가 비어있다면 파라미터를 block
+                jax.tree.map(lambda x: x.block_until_ready(), agent.network.params)
 
-        step_time = (time.time() - t0) * 1000
+            step_time = (time.time() - t0) * 1000
 
-        if i % FLAGS.log_interval == 0:
-            # --- [2. Pure Inference Time 측정 (선택 사항)] ---
-            # 학습 중간에 순수 추론(Action Sampling) 속도만 따로 재고 싶을 때
-            t_inf_start = time.time()
-            inf_actions = agent.sample_actions(dummy_obs, rng=rng) # 배치 사이즈 1 기준
-            inf_actions.block_until_ready() # 필수
-            inference_latency_ms = (time.time() - t_inf_start) * 1000
-            # ------------------------------------------------
+            if i % FLAGS.log_interval == 0:
+                # --- [2. Pure Inference Time 측정 (선택 사항)] ---
+                # 학습 중간에 순수 추론(Action Sampling) 속도만 따로 재고 싶을 때
+                t_inf_start = time.time()
+                inf_actions = agent.sample_actions(dummy_obs, rng=rng) # 배치 사이즈 1 기준
+                inf_actions.block_until_ready() # 필수
+                inference_latency_ms = (time.time() - t_inf_start) * 1000
+                # ------------------------------------------------
 
-            # --- [3. VRAM 측정] ---
-            vram_usage = get_vram_usage()
-            # ----------------------
+                # --- [3. VRAM 측정] ---
+                vram_usage = get_jax_memory_usage()
+                # ----------------------
 
-            # 메트릭 추가
-            info['perf/train_step_time_sec'] = step_time
-            info['perf/inference_latency_ms'] = inference_latency_ms
-            info['perf/vram_usage_mb'] = vram_usage
-            
-            logger.log(info, step=log_step)
+                # 메트릭 추가
+                info['perf/train_step_time_sec'] = step_time
+                info['perf/inference_latency_ms'] = inference_latency_ms
+                info['perf/vram_usage_mb'] = vram_usage
+                
+                logger.log(info, step=log_step)
 
         # if i % FLAGS.log_interval == 0:
         #     logger.log(info, step=log_step)
