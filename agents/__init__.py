@@ -8,6 +8,7 @@ from agents.fmlql import FMLQLAgent
 from agents.cfm import ConsistencyFlowAgent
 from agents.meanflowrf import MEANFLOWRFAgent
 from agents.dsrl import DSRLAgent
+from agents.fmonesteplql import FMONESTEPLQLAgent
 
 agents = dict(
     qcfql=QCFQLAgent,
@@ -19,4 +20,5 @@ agents = dict(
     cfm=ConsistencyFlowAgent,
     meanflowrf=MEANFLOWRFAgent,
     dsrl=DSRLAgent,
+    fmonesteplql=FMONESTEPLQLAgent
 )

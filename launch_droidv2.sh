@@ -13,7 +13,7 @@ export save_dir="/data5/jellyho/lql_droid_20k/"
 # export extract_method="ddpg"
 
 
-for task in "droid_pnp_carrot" "droid_refill_tape"; do
+for task in "droid_eggplant_bin" "droid_plug_in_bulb"; do
     for model_name in "meanflowq" "dsrl" "flow" "meanflow"; do
         for seed in "100"; do
             echo "${JOBNAME}_${task}_${seed}"
