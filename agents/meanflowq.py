@@ -77,7 +77,7 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
 
         ##### It does not need to be normal distirbution
         e = sample_latent_dist(x_rng, (batch_size, action_dim), self.config['latent_dist'])
-        if self.config['mf_method'] in ['jit_mf', 'mfql']:
+        if self.config['mf_method'] in ['jit_mf', 'mfql', 'mf']:
             z = (1 - t) * x + t * e
             v = e - x
         else:
@@ -116,7 +116,6 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             err = u - u_tgt
             loss = adaptive_l2_loss(err)
         ############################################
-
         ############################################
         elif self.config['mf_method'] == 'mfql':
             g_pred, dgdt = jax.jvp(
@@ -130,13 +129,13 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
             loss = adaptive_l2_loss(err)
 
         ############################################
-        elif self.config['mf_method'] == 'jit':
+        elif self.config['mf_method'] == 'mf':
             u_pred, dudr = jax.jvp(
-                mean_flow_jit_forward, 
+                mean_flow_forward, 
                 (z, t, r), 
                 (v, jnp.zeros_like(t), jnp.ones_like(r))
             )
-            u_tgt = v + jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudr
+            u_tgt = v - jnp.clip(t - r, a_min=0.0, a_max=1.0) * dudr
             u_tgt = jax.lax.stop_gradient(u_tgt)
             err = u_pred - u_tgt
             loss = adaptive_l2_loss(err)
@@ -336,13 +335,14 @@ class MEANFLOWQAgent(flax.struct.PyTreeNode):
         t = jnp.ones_like((noise[..., :1]))
         r = jnp.zeros_like((noise[..., :1]))
         
-        if self.config['mf_method'] == 'jit':
+        if self.config['mf_method'] == 'mf':
             output = self.network.select('actor_bc_flow')(
                 observation,
                 noise, 
-                t - r, 
-                r,
+                t, 
+                t - r,
             )
+            output = noise - output
         else:
             output = self.network.select('actor_bc_flow')(
                 observation,

@@ -21,7 +21,7 @@
 # "cube-single-play" "cube-double-play" "scene-play" "puzzle-3x3-play" "puzzle-4x4-play"
 
 
-export PART='suma_rtx4090,base_suma_rtx3090,big_suma_rtx3090,suma_A6000,gigabyte_A6000,gigabyte_A5000'
+export PART='base_suma_rtx3090,big_suma_rtx3090,suma_rtx4090,suma_a6000,gigabyte_a6000,asus_6000ada,tyan_a6000,gigabyte_a5000,dell_rtx3090'
 export QOS='base_qos'
 export MUJOCO_GL='egl'
 export JOBNAME="QCMFQL_VISUAL_FINAL"

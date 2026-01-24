@@ -10,7 +10,7 @@ python main.py \
     --task_name $1 \
     --task_num 0 \
     --env_name "$1" \
-    --horizon_length 10 \
+    --horizon_length 5 \
     --agent.lr 3e-4 \
     --eval_interval 2000 \
     --save_interval 2000 \
