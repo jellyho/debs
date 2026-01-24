@@ -12,7 +12,7 @@ export extract_method="ddpg"
 
 #  "puzzle-3x3-play"
 for task_num in "1"; do
-    for latent in "sphere"; do
+    for latent in "truncated_normal"; do
         for task in "cube-single-play"; do
             for alpha in "1.0"; do
                 for seed in "100"; do

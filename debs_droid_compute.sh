@@ -21,7 +21,7 @@ python main_compute.py \
     --agent.num_critic 2 \
     --agent.alpha $4 \
     --agent.extract_method "ddpg" \
-    --agent.mf_method "jit_mf" \
+    --agent.mf_method "$9" \
     --seed $6 \
     --agent.encoder "impala" \
     --p_aug=0.5 \

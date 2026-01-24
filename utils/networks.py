@@ -348,10 +348,7 @@ class ActorVectorField(nn.Module):
         if self.latent_dist == 'normal':
             return v
         elif self.latent_dist == 'truncated_normal':
-            norm = jnp.linalg.norm(v, axis=-1, keepdims=True)
-            scale = 2.0 * jnp.tanh(norm) / (norm + 1e-6)
-            z = v * scale
-            return z
+            return 2 * nn.tanh(v)
         elif self.latent_dist == 'uniform':
             return nn.tanh(v)
         elif self.latent_dist == 'simplex':

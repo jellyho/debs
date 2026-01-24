@@ -49,12 +49,7 @@ def sample_latent_dist(x_rng, sample_shape, latent_dist='sphere'):
     if latent_dist == 'normal':
         e = jax.random.normal(x_rng, sample_shape)
     elif latent_dist == 'truncated_normal':
-        raw_e = jax.random.normal(x_rng, sample_shape)
-        sigma = 0.9 / jnp.sqrt(sample_shape[-1])
-        e_scaled = raw_e * sigma
-        e_norm = jnp.linalg.norm(e_scaled, axis=-1, keepdims=True)
-        scale = jnp.minimum(1.0, 1.0 / (e_norm + 1e-6))
-        e = e_scaled * scale
+        e = jax.random.truncated_normal(x_rng, -2.0, 2.0, shape=sample_shape)
     elif latent_dist == 'uniform':
         e = jax.random.uniform(x_rng, sample_shape, minval=-1.0, maxval=1.0)
     elif latent_dist == 'sphere':
