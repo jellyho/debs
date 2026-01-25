@@ -22,7 +22,8 @@ python main.py \
     --agent.alpha $4 \
     --seed $7 \
     --agent.latent_actor_hidden_dims $8 \
-    --agent.critic_agg $9
+    --agent.critic_agg $9 \
+    --agent.mf_method ${11}
     # --agent.weight_decay 0.1
     # --agent.extract_method "ddpg" \
 
