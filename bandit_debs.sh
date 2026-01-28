@@ -8,9 +8,9 @@ python main.py \
     --env_name="bandit-$1" \
     --horizon_length 1 \
     --agent.lr 3e-4 \
-    --eval_interval 10000 \
+    --eval_interval 1000 \
     --video_episodes 1 \
-    --offline_steps 100000 \
+    --offline_steps 10000 \
     --save_dir "exp/" \
     --agent.latent_dist $3 \
     --agent.alpha $4 \
