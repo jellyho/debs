@@ -73,6 +73,13 @@ class Dataset(FrozenDict):
         self._valid_indices = None
         self._stats = None
 
+    def update_locs(self):
+        self._valid_indices = None
+        self.terminal_locs = np.nonzero(self['terminals'] > 0)[0]
+        if len(self.terminal_locs) == 0:
+            self.terminal_locs = np.array([self.size - 1])
+        self.initial_locs = np.concatenate([[0], self.terminal_locs[:-1] + 1])
+
     @property
     def valid_indices(self):
         """Get valid indices."""
@@ -227,13 +234,7 @@ class ReplayBuffer(Dataset):
 
     @classmethod
     def create(cls, transition, size):
-        """Create a replay buffer from the example transition.
-
-        Args:
-            transition: Example transition (dict).
-            size: Size of the replay buffer.
-        """
-
+        """Create a replay buffer from the example transition."""
         def create_buffer(example):
             example = np.array(example)
             return np.zeros((size, *example.shape), dtype=example.dtype)
@@ -243,13 +244,7 @@ class ReplayBuffer(Dataset):
 
     @classmethod
     def create_from_initial_dataset(cls, init_dataset, size):
-        """Create a replay buffer from the initial dataset.
-
-        Args:
-            init_dataset: Initial dataset.
-            size: Size of the replay buffer.
-        """
-
+        """Create a replay buffer from the initial dataset."""
         def create_buffer(init_buffer):
             buffer = np.zeros((size, *init_buffer.shape[1:]), dtype=init_buffer.dtype)
             buffer[: len(init_buffer)] = init_buffer
@@ -268,19 +263,57 @@ class ReplayBuffer(Dataset):
         self.pointer = 0
 
     def add_transition(self, transition):
-        """Add a transition to the replay buffer."""
+        """Add a transition to the replay buffer and update episode locations."""
+        
+        # 1. 기존 데이터가 Terminal이었는지 확인 (덮어쓰기 전 체크)
+        # self.pointer 위치에 있는 기존 데이터가 에피소드의 끝이었는지 확인합니다.
+        # 아직 데이터가 없는 초기 상태(0)일 수 있으므로 size 체크를 합니다.
+        prev_is_terminal = False
+        if self.size > self.pointer:
+            prev_is_terminal = self._dict['terminals'][self.pointer] > 0
 
+        # 2. 데이터 덮어쓰기 (In-place update)
         def set_idx(buffer, new_element):
             buffer[self.pointer] = new_element
 
         jax.tree_util.tree_map(set_idx, self._dict, transition)
+
+        # 3. 새로 들어온 데이터가 Terminal인지 확인
+        new_is_terminal = transition['terminals'] > 0
+
+        # 4. terminal_locs 동적 업데이트
+        # (기존 상태와 새 상태가 다를 때만 무거운 numpy 연산을 수행합니다)
+        if prev_is_terminal != new_is_terminal:
+            if prev_is_terminal:
+                # Case A: 원래 Terminal이었는데 -> 일반 데이터로 덮어씌워짐 (에피소드 연결됨)
+                # 해당 인덱스(self.pointer)를 terminal_locs에서 제거
+                self.terminal_locs = self.terminal_locs[self.terminal_locs != self.pointer]
+            
+            elif new_is_terminal:
+                # Case B: 원래 일반 데이터였는데 -> Terminal로 바뀜 (새 에피소드 종료)
+                # self.pointer를 terminal_locs에 정렬된 상태로 삽입
+                # searchsorted로 들어갈 위치를 찾고 insert로 넣습니다.
+                insert_idx = np.searchsorted(self.terminal_locs, self.pointer)
+                self.terminal_locs = np.insert(self.terminal_locs, insert_idx, self.pointer)
+
+            # 5. initial_locs 업데이트 (terminal_locs에 의존적임)
+            # Dataset.__init__의 로직과 동일하게 유지: [0] + (terminals + 1)
+            if len(self.terminal_locs) > 0:
+                self.initial_locs = np.concatenate([[0], self.terminal_locs[:-1] + 1])
+            else:
+                # 터미널이 하나도 없는 경우 (아직 에피소드가 안 끝남)
+                self.initial_locs = np.array([0])
+
+        # 6. 포인터 이동
         self.pointer = (self.pointer + 1) % self.max_size
         self.size = max(self.pointer, self.size)
 
     def clear(self):
         """Clear the replay buffer."""
         self.size = self.pointer = 0
-
+        # locs 정보도 초기화
+        self.terminal_locs = np.array([], dtype=int)
+        self.initial_locs = np.array([0], dtype=int)
 
 @dataclasses.dataclass
 class GCDataset:

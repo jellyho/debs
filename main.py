@@ -31,7 +31,8 @@ flags.DEFINE_integer('task_num', 0, 'Task Num')
 flags.DEFINE_string('env_name', 'cube-triple-play-singletask-task2-v0', 'Environment (dataset) name.')
 flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
 
-flags.DEFINE_integer('offline_steps', 1000000, 'Number of online steps.')
+flags.DEFINE_integer('offline_steps', 1000000, 'Number of offline steps.')
+flags.DEFINE_integer('online_steps', 0, 'Number of online steps.')
 flags.DEFINE_integer('buffer_size', 2000000, 'Replay buffer size.')
 flags.DEFINE_integer('log_interval', 5000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 100000, 'Evaluation interval.')
@@ -169,7 +170,7 @@ def main(_):
     config["horizon_length"] = FLAGS.horizon_length
 
     # handle dataset
-    def process_train_dataset(dataset):
+    def process_train_dataset(dataset, is_dataset=True):
         """
         Process the train dataset to 
             - handle dataset proportion
@@ -177,7 +178,8 @@ def main(_):
             - convert to action chunked dataset
         """
 
-        dataset = Dataset.create(**dataset)
+        if is_dataset:
+            dataset = Dataset.create(**dataset)
         if FLAGS.dataset_proportion < 1.0:
             new_size = int(len(dataset['masks']) * FLAGS.dataset_proportion)
             dataset = Dataset.create(
@@ -246,6 +248,7 @@ def main(_):
     )
 
     # Offline RL
+    print('Offline RL Started', FLAGS.offline_steps)
     for i in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):
         log_step += 1
         batch = train_dataset.sample(config['batch_size'])
@@ -286,6 +289,130 @@ def main(_):
                         }, step=log_step)
             if config.get('use_DiT', False):
                 save_agent(agent, FLAGS.save_dir, log_step)
+    
+    if FLAGS.online_steps <= 0:
+        return None
+    
+    def get_initialization_sample(batch, index=0):
+        sample = {}
+
+        for k, v in batch.items():
+            if hasattr(v, 'items'):
+                sample[k] = get_initialization_sample(v, index)
+            else:
+                sample[k] = v[index]
+        if 'terminals' in sample:
+            sample['terminals'] = np.ones_like(sample['terminals'])
+        return sample
+    
+    replay_buffer = ReplayBuffer.create_from_initial_dataset(dict(train_dataset), size=FLAGS.buffer_size)
+    replay_buffer = process_train_dataset(replay_buffer, False)
+    replay_buffer.update_locs()
+
+    ob, _ = env.reset()
+
+    online_rng, rng = jax.random.split(jax.random.PRNGKey(FLAGS.seed), 2)
+
+    action_queue = []
+    action_dim = example_batch["actions"].shape[-1]
+
+    update_info = {}
+    
+    print('Online RL Started', FLAGS.online_steps)
+
+    for j in tqdm.tqdm(range(1, FLAGS.online_steps + 1)):
+        log_step += 1
+        online_rng, key = jax.random.split(online_rng)
+
+        if len(action_queue) == 0:
+            action = agent.sample_actions(observations=ob, rng=key)
+            action_chunk = np.array(action).reshape(-1, action_dim)
+            for action in action_chunk:
+                action_queue.append(action)
+
+        action = action_queue.pop(0)
+
+        next_ob, int_reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+
+        env_info = {}
+        for key, value in info.items():
+            if key.startswith("distance"):
+                env_info[key] = value
+
+        # logger.log(env_info, prefix="env", step=log_step)
+
+        if "puzzle-3x3" in FLAGS.task_name or "scene" in FLAGS.task_name:
+            assert int_reward <= 0.0
+            int_reward = (int_reward != 0.0) * -1.0
+
+        transition = dict(
+            observations=ob,
+            actions=action,
+            rewards=int_reward,
+            terminals=float(done),
+            masks=1.0 - terminated,
+            next_observations=next_ob,
+        )
+        replay_buffer.add_transition(transition)
+        # print(replay_buffer.initial_locs, replay_buffer.terminal_locs)
+
+        if done:
+            ob, _ = env.reset()
+            action_queue = []  # reset the action queue
+            # replay_buffer.update_locs()
+        else:
+            ob = next_ob
+
+        # dataset_batch = train_dataset.sample(config['batch_size'] // 2 * FLAGS.utd_ratio)
+        batch = replay_buffer.sample(FLAGS.utd_ratio * config['batch_size'])
+        
+        # batch = {k: np.concatenate([
+        #     dataset_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + dataset_batch[k].shape[1:]), 
+        #     replay_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + replay_batch[k].shape[1:])], axis=1) for k in dataset_batch}
+        # batch = jax.tree.map(lambda x: x.reshape((
+        #     FLAGS.utd_ratio, config["batch_size"]) + x.shape[1:]), batch)
+
+        agent, update_info["online_agent"] = agent.update(batch)
+
+        if j % FLAGS.log_interval == 0:
+            logger.log(update_info, step=log_step)
+
+        update_info = {}
+        
+        # saving
+        if FLAGS.save_interval > 0 and j % FLAGS.eval_interval == 0:
+            if not is_droid and (FLAGS.eval_interval != 0 and j % FLAGS.eval_interval == 0):
+                # during eval, the action chunk is executed fully
+                if "bandit" in FLAGS.env_name:
+                    from envs.bandit_utils import evaluate
+                    eval_info, _, _ = evaluate(
+                        agent=agent,
+                        env=eval_env,
+                        action_dim=example_batch["actions"].shape[-1],
+                        num_eval_episodes=FLAGS.eval_episodes,
+                        num_video_episodes=FLAGS.video_episodes,
+                        video_frame_skip=FLAGS.video_frame_skip,
+                    )
+                    logger.log(eval_info, log_step, "eval")
+                else:
+                    from evaluation import evaluate
+                    eval_info, _, video = evaluate(
+                        agent=agent,
+                        env=eval_env,
+                        action_dim=example_batch["actions"].shape[-1],
+                        num_eval_episodes=FLAGS.eval_episodes,
+                        num_video_episodes=FLAGS.video_episodes,
+                        video_frame_skip=FLAGS.video_frame_skip,
+                    )
+                    logger.log(eval_info, log_step, "eval")
+                    if len(video) > 0:
+                        wandb.log({
+                            f"eval_video": wandb.Video(np.vstack(video).transpose(0, 3, 1, 2), fps=20, format="mp4")
+                        }, step=log_step)
+        if FLAGS.save_interval > 0 and j % FLAGS.save_interval == 0:
+            save_agent(agent, FLAGS.save_dir, log_step)
+
 
 if __name__ == '__main__':
     app.run(main)

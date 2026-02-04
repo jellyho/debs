@@ -10,6 +10,7 @@ import optax
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field, get_batch_shape
 from utils.networks import ActorVectorField, Value
+from utils.dit import mf_dit_models
 
 class FMLQLAgent(flax.struct.PyTreeNode):
     """Flow Q-learning (FQL) agent with action chunking. 
@@ -112,7 +113,7 @@ class FMLQLAgent(flax.struct.PyTreeNode):
     
     def latent_actor_loss(self, batch, grad_params, rng):
         observations = batch['observations']
-        batch_size = observations.shape[0]
+        batch_size = batch['actions'].shape[0]
         latent_dim = self.config['action_dim'] * self.config['horizon_length']
         
         ### Query latent actor
@@ -279,7 +280,10 @@ class FMLQLAgent(flax.struct.PyTreeNode):
     ):
         """Compute actions from the BC flow model using the Euler method."""
         if self.config['encoder'] is not None:
-            observations = self.network.select('actor_bc_flow_encoder')(observations)
+            if isinstance(observations, (dict, flax.core.FrozenDict)):
+                observations['image'] = self.network.select('actor_bc_flow_encoder')(observations['image'])
+            else:
+                observations = self.network.select('actor_bc_flow_encoder')(observations)
         actions = noises
         # Euler method.
         for i in range(self.config['flow_steps']):
@@ -340,12 +344,21 @@ class FMLQLAgent(flax.struct.PyTreeNode):
             encoder=encoders.get('critic'),
         )
 
-        actor_bc_flow_def = ActorVectorField(
-            hidden_dims=config['actor_hidden_dims'],
-            action_dim=full_action_dim,
-            layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('actor_bc_flow'),
-        )
+        if config['use_DiT']:
+            model_cls = mf_dit_models[config['size_DiT']]
+            actor_bc_flow_def = model_cls(
+                output_dim=action_dim,  
+                output_len=action_len,
+                encoder=encoders['actor_bc_flow'],
+                use_r=False
+            )
+        else:
+            actor_bc_flow_def = ActorVectorField(
+                hidden_dims=config['actor_hidden_dims'],
+                action_dim=full_action_dim,
+                layer_norm=config['actor_layer_norm'],
+                encoder=encoders.get('actor_bc_flow'),
+            )
 
         latent_actor_def = ActorVectorField(
             hidden_dims=config['actor_hidden_dims'],
@@ -358,7 +371,7 @@ class FMLQLAgent(flax.struct.PyTreeNode):
         if config['extract_method'] == 'onestep_ddpg':
             latent_actor_input_shape = (ex_observations, full_actions)
         else:
-            latent_actor_input_shape = (ex_observations)
+            latent_actor_input_shape = (ex_observations,)
 
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
@@ -369,7 +382,10 @@ class FMLQLAgent(flax.struct.PyTreeNode):
 
         if encoders.get('actor_bc_flow') is not None:
             # Add actor_bc_flow_encoder to ModuleDict to make it separately callable.
-            network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
+            if isinstance(ex_observations, (dict, flax.core.FrozenDict)):
+                network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations['image'],))
+            else:
+                network_info['actor_bc_flow_encoder'] = (encoders.get('actor_bc_flow'), (ex_observations,))
 
         networks = {k: v[0] for k, v in network_info.items()}
         network_args = {k: v[1] for k, v in network_info.items()}
@@ -379,7 +395,22 @@ class FMLQLAgent(flax.struct.PyTreeNode):
         if config["weight_decay"] > 0.:
             network_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
         else:
-            network_tx = optax.adam(learning_rate=config['lr'])
+            if config['use_DiT']:
+                warmup_steps = int(config['training_steps'] * 0.01)
+                decay_steps = config['training_steps'] - warmup_steps
+                lr_schedule = optax.warmup_cosine_decay_schedule(
+                    init_value=0.0,             # Warmup 시작 LR (보통 0)
+                    peak_value=config['lr'],    # Warmup 끝난 후 도달할 최대 LR
+                    warmup_steps=warmup_steps,
+                    decay_steps=decay_steps, # 전체 감쇠 기간
+                    end_value=config['lr'] / 10 # 학습 끝날 때 LR (보통 peak의 1/10 ~ 0)
+                )
+                network_tx = optax.chain(
+                    optax.clip_by_global_norm(1.0),
+                    optax.adam(learning_rate=lr_schedule),
+                )
+            else:
+                network_tx = optax.adam(learning_rate=config['lr'])
 
         variables = network_def.init(init_rng, **network_args)
         network_params = variables['params']
@@ -410,7 +441,7 @@ def get_config():
             batch_size=256,  # Batch size.
             actor_hidden_dims=(512, 512, 512, 512),  # Actor network hidden dimensions.
             critic_hidden_dims=(256, 256, 256, 256),  # Value network hidden dimensions.
-            latent_actor_hidden_dims=(256, 256, 256, 256),
+            latent_actor_hidden_dims=(256, 256),
             layer_norm=True,  # Whether to use layer normalization.
             actor_layer_norm=False,  # Whether to use layer normalization for the actor.
             discount=0.99,  # Discount factor.
@@ -425,6 +456,9 @@ def get_config():
             fourier_feature_dim=64,
             weight_decay=0.,
             latent_dist='uniform',
+            use_DiT=False,
+            size_DiT='base',
+            training_steps=1000000,
             # unused
             extract_method='ddpg', # 'ddpg', 'awr',,
             mf_method='unused',

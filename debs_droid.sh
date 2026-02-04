@@ -7,16 +7,17 @@ python main.py \
     --project "MFQ_DROID" \
     --run_group "$2:$5" \
     --droid_dataset_dir "$7" \
+    --droid_use_failure true \
     --task_name $1 \
     --task_num 0 \
     --env_name "$1" \
     --horizon_length 5 \
     --agent.lr 3e-4 \
     --eval_interval 10000 \
-    --save_interval 10000 \
+    --save_interval 5000 \
     --eval_episodes 50 \
     --video_episodes 10 \
-    --offline_steps 20000 \
+    --offline_steps 10000 \
     --save_dir $8 \
     --agent.num_critic 2 \
     --agent.alpha $4 \
