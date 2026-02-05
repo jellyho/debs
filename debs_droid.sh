@@ -31,6 +31,7 @@ python main.py \
     --log_interval 100 \
     --agent.critic_hidden_dims "(512, 512, 512, 512)" \
     --agent.latent_actor_hidden_dims "(512, 512)" \
+    # --droid_use_failure
     # --agent.weight_decay 0.1
 
 # #-task$2-v0 \
