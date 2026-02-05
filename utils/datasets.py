@@ -263,49 +263,63 @@ class ReplayBuffer(Dataset):
         self.pointer = 0
 
     def add_transition(self, transition):
-        """Add a transition to the replay buffer and update episode locations."""
+        """
+        Add a transition to the replay buffer.
+        Assumes: No circular buffer (infinite size), simply appends data.
+        """
         
-        # 1. 기존 데이터가 Terminal이었는지 확인 (덮어쓰기 전 체크)
-        # self.pointer 위치에 있는 기존 데이터가 에피소드의 끝이었는지 확인합니다.
-        # 아직 데이터가 없는 초기 상태(0)일 수 있으므로 size 체크를 합니다.
-        prev_is_terminal = False
-        if self.size > self.pointer:
-            prev_is_terminal = self._dict['terminals'][self.pointer] > 0
+        # 1. 초기화: valid_indices가 없으면 생성 (첫 실행 시)
+        if self._valid_indices is None:
+             _ = self.valid_indices  # 프로퍼티 호출해서 초기화
 
-        # 2. 데이터 덮어쓰기 (In-place update)
+        # 2. 데이터 저장 (In-place update)
+        # 꽉 차지 않는다고 가정하므로 덮어쓰기 걱정 없이 현재 포인터에 넣습니다.
         def set_idx(buffer, new_element):
             buffer[self.pointer] = new_element
-
+        
         jax.tree_util.tree_map(set_idx, self._dict, transition)
 
-        # 3. 새로 들어온 데이터가 Terminal인지 확인
-        new_is_terminal = transition['terminals'] > 0
-
-        # 4. terminal_locs 동적 업데이트
-        # (기존 상태와 새 상태가 다를 때만 무거운 numpy 연산을 수행합니다)
-        if prev_is_terminal != new_is_terminal:
-            if prev_is_terminal:
-                # Case A: 원래 Terminal이었는데 -> 일반 데이터로 덮어씌워짐 (에피소드 연결됨)
-                # 해당 인덱스(self.pointer)를 terminal_locs에서 제거
-                self.terminal_locs = self.terminal_locs[self.terminal_locs != self.pointer]
+        # 3. Terminal 정보 업데이트
+        # 덮어쓰기가 없으므로 '기존 데이터가 터미널이었는지' 체크할 필요 없음.
+        # 이번에 들어온 데이터가 터미널인지만 보면 됩니다.
+        if transition['terminals'] > 0:
+            # 순서대로 쌓이므로 그냥 append 하면 정렬 상태 유지됨
+            self.terminal_locs = np.append(self.terminal_locs, self.pointer)
             
-            elif new_is_terminal:
-                # Case B: 원래 일반 데이터였는데 -> Terminal로 바뀜 (새 에피소드 종료)
-                # self.pointer를 terminal_locs에 정렬된 상태로 삽입
-                # searchsorted로 들어갈 위치를 찾고 insert로 넣습니다.
-                insert_idx = np.searchsorted(self.terminal_locs, self.pointer)
-                self.terminal_locs = np.insert(self.terminal_locs, insert_idx, self.pointer)
+            # initial_locs 업데이트 (다음 에피소드의 시작점 미리 등록)
+            # 현재 pointer가 터미널이면, 다음 데이터(pointer+1)는 새 에피소드 시작임
+            self.initial_locs = np.append(self.initial_locs, self.pointer + 1)
 
-            # 5. initial_locs 업데이트 (terminal_locs에 의존적임)
-            # Dataset.__init__의 로직과 동일하게 유지: [0] + (terminals + 1)
-            if len(self.terminal_locs) > 0:
-                self.initial_locs = np.concatenate([[0], self.terminal_locs[:-1] + 1])
-            else:
-                # 터미널이 하나도 없는 경우 (아직 에피소드가 안 끝남)
-                self.initial_locs = np.array([0])
+        # 4. Valid Indices 업데이트 (핵심: Incremental Update)
+        # 현재 추가된 데이터(self.pointer)로 인해 새로운 유효 시퀀스가 생겼는지 확인
+        
+        # 시퀀스 길이 조건
+        seq_len = self.actor_action_sequence * self.nstep
+        
+        # 현재 에피소드의 시작점 찾기
+        # initial_locs의 마지막 원소가 현재 진행 중인 에피소드의 시작점입니다.
+        # (위에서 terminal일 경우 pointer+1을 추가했으므로, 그 전까진 마지막 원소가 시작점)
+        current_ep_start = self.initial_locs[-1]
+        
+        # 만약 방금 terminal을 추가해서 initial_locs가 갱신되었다면?
+        # -> 방금 끝난 에피소드의 시작점은 initial_locs[-2]가 됩니다.
+        if transition['terminals'] > 0:
+             current_ep_start = self.initial_locs[-2]
+        
+        # 현재 에피소드의 길이 계산 (start ~ current pointer)
+        current_ep_len = self.pointer - current_ep_start + 1
+        
+        # 길이가 조건보다 길거나 같다면, 유효 인덱스 추가
+        if current_ep_len >= seq_len:
+            # 새로 유효해진 인덱스: (현재 위치) - (시퀀스 길이) + 1
+            # 예: 길이 3 필요. 0,1,2 들어옴(idx 2). 2-3+1 = 0번 인덱스가 유효해짐.
+            new_valid_idx = self.pointer - seq_len + 1
+            
+            # 단순히 끝에 추가 (Append)
+            self._valid_indices = np.append(self._valid_indices, new_valid_idx)
 
-        # 6. 포인터 이동
-        self.pointer = (self.pointer + 1) % self.max_size
+        # 5. 포인터 이동 (단순 증가)
+        self.pointer += 1
         self.size = max(self.pointer, self.size)
 
     def clear(self):
@@ -314,280 +328,3 @@ class ReplayBuffer(Dataset):
         # locs 정보도 초기화
         self.terminal_locs = np.array([], dtype=int)
         self.initial_locs = np.array([0], dtype=int)
-
-@dataclasses.dataclass
-class GCDataset:
-    """Dataset class for goal-conditioned RL.
-
-    This class provides a method to sample a batch of transitions with goals (value_goals and actor_goals) from the
-    dataset. The goals are sampled from the current state, future states in the same trajectory, and random states.
-
-    It reads the following keys from the config:
-    - discount: Discount factor for geometric sampling.
-    - value_p_curgoal: Probability of using the current state as the value goal.
-    - value_p_trajgoal: Probability of using a future state in the same trajectory as the value goal.
-    - value_p_randomgoal: Probability of using a random state as the value goal.
-    - value_geom_sample: Whether to use geometric sampling for future value goals.
-    - actor_p_curgoal: Probability of using the current state as the actor goal.
-    - actor_p_trajgoal: Probability of using a future state in the same trajectory as the actor goal.
-    - actor_p_randomgoal: Probability of using a random state as the actor goal.
-    - actor_geom_sample: Whether to use geometric sampling for future actor goals.
-    - gc_negative: Whether to use '0 if s == g else -1' (True) or '1 if s == g else 0' (False) as the reward.
-
-    Attributes:
-        dataset: Dataset object.
-        config: Configuration dictionary.
-    """
-
-    dataset: Dataset
-    config: Any
-
-    def __post_init__(self):
-        self.size = self.dataset.size
-
-        # Pre-compute trajectory boundaries.
-        (self.terminal_locs,) = np.nonzero(self.dataset['terminals'] > 0)
-        self.initial_locs = np.concatenate([[0], self.terminal_locs[:-1] + 1])
-        assert self.terminal_locs[-1] == self.size - 1
-
-        # Assert probabilities sum to 1.
-        assert np.isclose(
-            self.config['value_p_curgoal'] + self.config['value_p_trajgoal'] + self.config['value_p_randomgoal'], 1.0
-        )
-        assert np.isclose(
-            self.config['actor_p_curgoal'] + self.config['actor_p_trajgoal'] + self.config['actor_p_randomgoal'], 1.0
-        )
-
-    def sample(self, batch_size: int, idxs=None, evaluation=False):
-        """Sample a batch of transitions with goals.
-
-        This method samples a batch of transitions with goals (value_goals and actor_goals) from the dataset. They are
-        stored in the keys 'value_goals' and 'actor_goals', respectively. It also computes the 'rewards' and 'masks'
-        based on the indices of the goals.
-
-        Args:
-            batch_size: Batch size.
-            idxs: Indices of the transitions to sample. If None, random indices are sampled.
-            evaluation: Whether to sample for evaluation.
-        """
-        if idxs is None:
-            idxs = self.dataset.get_random_idxs(batch_size)
-
-        batch = self.dataset.sample(batch_size, idxs)
-
-        value_goal_idxs = self.sample_goals(
-            idxs,
-            self.config['value_p_curgoal'],
-            self.config['value_p_trajgoal'],
-            self.config['value_p_randomgoal'],
-            self.config['value_geom_sample'],
-        )
-        actor_goal_idxs = self.sample_goals(
-            idxs,
-            self.config['actor_p_curgoal'],
-            self.config['actor_p_trajgoal'],
-            self.config['actor_p_randomgoal'],
-            self.config['actor_geom_sample'],
-        )
-
-        if 'oracle_reps' in self.dataset:
-            batch['value_goals'] = self.dataset['oracle_reps'][value_goal_idxs]
-            batch['actor_goals'] = self.dataset['oracle_reps'][actor_goal_idxs]
-        else:
-            batch['value_goals'] = self.get_observations(value_goal_idxs)
-            batch['actor_goals'] = self.get_observations(actor_goal_idxs)
-        successes = (idxs == value_goal_idxs).astype(float)
-        batch['masks'] = 1.0 - successes
-        batch['rewards'] = successes - (1.0 if self.config['gc_negative'] else 0.0)
-
-        return batch
-
-    def sample_goals(self, idxs, p_curgoal, p_trajgoal, p_randomgoal, geom_sample, discount=None):
-        """Sample goals for the given indices."""
-        batch_size = len(idxs)
-        if discount is None:
-            discount = self.config['discount']
-
-        # Random goals.
-        random_goal_idxs = self.dataset.get_random_idxs(batch_size)
-
-        # Goals from the same trajectory (excluding the current state, unless it is the final state).
-        final_state_idxs = self.terminal_locs[np.searchsorted(self.terminal_locs, idxs)]
-        if geom_sample:
-            # Geometric sampling.
-            offsets = np.random.geometric(p=1 - discount, size=batch_size)  # in [1, inf)
-            traj_goal_idxs = np.minimum(idxs + offsets, final_state_idxs)
-        else:
-            # Uniform sampling.
-            distances = np.random.rand(batch_size)  # in [0, 1)
-            traj_goal_idxs = np.round(
-                (
-                    np.minimum(idxs + self.dataset.actor_action_sequence, final_state_idxs) * distances
-                    + final_state_idxs * (1 - distances)
-                )
-            ).astype(int)
-        if p_curgoal == 1.0:
-            goal_idxs = idxs
-        else:
-            goal_idxs = np.where(
-                np.random.rand(batch_size) < p_trajgoal / (1.0 - p_curgoal), traj_goal_idxs, random_goal_idxs
-            )
-
-            # Goals at the current state.
-            goal_idxs = np.where(np.random.rand(batch_size) < p_curgoal, idxs, goal_idxs)
-
-        return goal_idxs
-
-    def get_observations(self, idxs):
-        """Return the observations for the given indices."""
-        return jax.tree_util.tree_map(lambda arr: arr[idxs], self.dataset['observations'])
-
-
-@dataclasses.dataclass
-class HGCDataset(GCDataset):
-    """Dataset class for hierarchical goal-conditioned RL.
-
-    This class extends GCDataset to support hierarchical goal-conditioned RL. It reads the following additional key from
-    the config:
-    - subgoal_steps (optional: value_subgoal_steps, actor_subgoal_steps): Subgoal steps. It is also possible to specify
-        `value_subgoal_steps` and `actor_subgoal_steps` separately.
-    - low_discount: If specified, return low-level value goals as well.
-    """
-
-    def compute_high_next_idxs(self, idxs, final_state_idxs, high_goal_idxs, subgoal_steps):
-        """Compute the next indices for high-level goals."""
-        batch_size = len(idxs)
-        subgoal_steps = np.full(batch_size, subgoal_steps)
-
-        # Ensure minimum distance for action sequences
-        min_distance = np.maximum(self.dataset.actor_action_sequence, 1)
-        subgoal_steps = np.maximum(subgoal_steps, min_distance)
-
-        # Clip to the end of the trajectory.
-        subgoal_steps = np.minimum(subgoal_steps, final_state_idxs - idxs)
-
-        # Clip to the high-level goal.
-        diff_idxs = high_goal_idxs - idxs
-        should_clip = (0 <= diff_idxs) & (diff_idxs < subgoal_steps)
-        subgoal_steps = np.where(should_clip, diff_idxs, subgoal_steps)
-
-        return idxs + subgoal_steps, subgoal_steps
-
-    def get_high_actions(self, target_idxs, cur_idxs):
-        if 'oracle_reps' in self.dataset:
-            return self.dataset['oracle_reps'][target_idxs]
-        else:
-            return self.get_observations(target_idxs)
-
-    def sample(self, batch_size: int, idxs=None, evaluation=False):
-        if idxs is None:
-            idxs = self.dataset.get_random_idxs(batch_size)
-
-        batch = self.dataset.sample(batch_size, idxs)
-
-        final_state_idxs = self.terminal_locs[np.searchsorted(self.terminal_locs, idxs)]
-
-        # Sample high-level value goals.
-        high_value_goal_idxs = self.sample_goals(
-            idxs,
-            self.config['value_p_curgoal'],
-            self.config['value_p_trajgoal'],
-            self.config['value_p_randomgoal'],
-            self.config['value_geom_sample'],
-        )
-        value_subgoal_steps = (
-            self.config['subgoal_steps']
-            if self.config.get('value_subgoal_steps') is None
-            else self.config['value_subgoal_steps']
-        )
-        high_value_next_idxs, high_value_subgoal_steps = self.compute_high_next_idxs(
-            idxs,
-            final_state_idxs,
-            high_value_goal_idxs,
-            value_subgoal_steps,
-        )
-
-        if 'oracle_reps' in self.dataset:
-            batch['high_value_reps'] = self.dataset['oracle_reps'][idxs]
-            batch['high_value_goals'] = self.dataset['oracle_reps'][high_value_goal_idxs]
-            batch['high_value_actions'] = self.get_high_actions(high_value_next_idxs, idxs)
-            batch['high_value_next_observations'] = self.get_observations(high_value_next_idxs)
-        else:
-            batch['high_value_reps'] = batch['observations']
-            batch['high_value_goals'] = self.get_observations(high_value_goal_idxs)
-            batch['high_value_actions'] = self.get_high_actions(high_value_next_idxs, idxs)
-            batch['high_value_next_observations'] = self.get_observations(high_value_next_idxs)
-        batch['high_value_offsets'] = high_value_goal_idxs - idxs
-
-        high_value_successes = (high_value_subgoal_steps < value_subgoal_steps).astype(float)
-        batch['high_value_subgoal_steps'] = high_value_subgoal_steps
-        batch['high_value_masks'] = 1.0 - high_value_successes
-        if self.config['gc_negative']:
-            batch['high_value_rewards'] = -(1 - self.config['discount'] ** high_value_subgoal_steps) / (
-                1 - self.config['discount']
-            )
-        else:
-            batch['high_value_rewards'] = (self.config['discount'] ** high_value_subgoal_steps) * high_value_successes
-
-        # Sample low-level value goals (if requested).
-        if 'low_discount' in self.config:
-            low_value_goal_idxs = self.sample_goals(
-                idxs,
-                self.config['value_p_curgoal'],
-                self.config['value_p_trajgoal'],
-                self.config['value_p_randomgoal'],
-                geom_sample=True,
-                discount=self.config['low_discount'],
-            )
-
-            if 'oracle_reps' in self.dataset:
-                batch['low_value_goals'] = self.dataset['oracle_reps'][low_value_goal_idxs]
-            else:
-                batch['low_value_goals'] = self.get_observations(low_value_goal_idxs)
-            successes = (idxs == low_value_goal_idxs).astype(float)
-            batch['low_value_masks'] = 1.0 - successes
-            batch['low_value_rewards'] = successes - (1.0 if self.config['gc_negative'] else 0.0)
-
-        # One-step information.
-        successes = (idxs == high_value_goal_idxs).astype(float)
-        batch['masks'] = 1.0 - successes
-        batch['rewards'] = successes - (1.0 if self.config['gc_negative'] else 0.0)
-
-        # Sample high-level actor goals.
-        high_actor_goal_idxs = self.sample_goals(
-            idxs,
-            self.config['actor_p_curgoal'],
-            self.config['actor_p_trajgoal'],
-            self.config['actor_p_randomgoal'],
-            self.config['actor_geom_sample'],
-        )
-        actor_subgoal_steps = (
-            self.config['subgoal_steps']
-            if self.config.get('actor_subgoal_steps') is None
-            else self.config['actor_subgoal_steps']
-        )
-        high_actor_next_idxs, high_actor_subgoal_steps = self.compute_high_next_idxs(
-            idxs,
-            final_state_idxs,
-            high_actor_goal_idxs,
-            actor_subgoal_steps,
-        )
-
-        if 'oracle_reps' in self.dataset:
-            batch['high_actor_goals'] = self.dataset['oracle_reps'][high_actor_goal_idxs]
-            batch['high_actor_actions'] = self.get_high_actions(high_actor_next_idxs, idxs)
-            batch['high_actor_next_observations'] = self.get_observations(high_actor_next_idxs)
-        else:
-            batch['high_actor_goals'] = self.get_observations(high_actor_goal_idxs)
-            batch['high_actor_actions'] = self.get_high_actions(high_actor_next_idxs, idxs)
-            batch['high_actor_next_observations'] = self.get_observations(high_actor_next_idxs)
-
-        # Compute low-level actor goals.
-        min_low_actor_distance = np.maximum(self.dataset.actor_action_sequence, 1)
-        low_actor_goal_idxs = np.minimum(
-            np.maximum(idxs + actor_subgoal_steps, idxs + min_low_actor_distance), final_state_idxs
-        )
-
-        batch['low_actor_goals'] = self.get_high_actions(low_actor_goal_idxs, idxs)
-
-        return batch

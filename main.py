@@ -355,7 +355,8 @@ def main(_):
             next_observations=next_ob,
         )
         replay_buffer.add_transition(transition)
-        # print(replay_buffer.initial_locs, replay_buffer.terminal_locs)
+
+        # print(len(replay_buffer.initial_locs), len(replay_buffer.terminal_locs), len(replay_buffer.valid_indices))
 
         if done:
             ob, _ = env.reset()
@@ -370,6 +371,7 @@ def main(_):
         # batch = {k: np.concatenate([
         #     dataset_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + dataset_batch[k].shape[1:]), 
         #     replay_batch[k].reshape((FLAGS.utd_ratio, config["batch_size"] // 2) + replay_batch[k].shape[1:])], axis=1) for k in dataset_batch}
+
         # batch = jax.tree.map(lambda x: x.reshape((
         #     FLAGS.utd_ratio, config["batch_size"]) + x.shape[1:]), batch)
 
