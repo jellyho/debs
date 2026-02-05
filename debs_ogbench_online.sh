@@ -15,7 +15,7 @@ python main.py \
     --eval_episodes 50 \
     --video_episodes 10 \
     --agent.extract_method $8 \
-    --offline_steps 1000 \
+    --offline_steps 1000000 \
     --online_steps 1000000 \
     --save_dir "exp/" \
     --agent.num_critic 2 \
